@@ -29,7 +29,7 @@ Use the [OIDC authentication request playground](/docs/apis/openidoauth/authrequ
 :::info Getting a token
 In case you want to test out different settings configure an application with code flow (PKCE).
 Grab the code from the url parameter after a successful login and exchange the code for tokens by calling the [token endpoint](/docs/apis/openidoauth/endpoints#token_endpoint).
-You will find more information in our guides on how to [authenticate users](/docs/guides/integrate/login-users).
+You will find more information in our guides on how to [authenticate users](/docs/guides/integrate/login/oidc/login-users).
 :::
 
 ## Use tokens to get user metadata
@@ -219,6 +219,11 @@ An example response for your search looks like this:
 }
 ```
 
+## Register user with custom metadata
+
+When you build your own registration UI you have the possibility to have custom fields and add them to the metadata of your user.
+Learn everything about how to build your own registration UI [here](/docs/guides/integrate/onboarding/end-users#build-your-own-registration-form).
+
 ## Manage user metadata through the management API
 
 The previous methods allowed you to retrieve metadata only for the `sub` in the access token.
@@ -227,4 +232,4 @@ The user that calls the management service must have [manager permissions](/docs
 A user can be either a human user or a service user.
 
 You can get [metadata of a user filtered by your query](/docs/apis/resources/mgmt/management-service-list-user-metadata) or [get a metadata object from a user by a specific key](/docs/apis/resources/mgmt/management-service-get-user-metadata).
-The management service allows you to set and delete metadata, see the [API documentation for users](/docs/category/apis/resources/mgmt/users).
+The management service allows you to set and delete metadata, see the [API documentation for users](/docs/apis/resources/mgmt/users).

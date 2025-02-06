@@ -14,11 +14,16 @@ import (
 )
 
 type ChangeHuman struct {
-	ID       string
-	Username *string
-	Profile  *Profile
-	Email    *Email
-	Phone    *Phone
+	ID            string
+	ResourceOwner string
+	State         *domain.UserState
+	Username      *string
+	Profile       *Profile
+	Email         *Email
+	Phone         *Phone
+
+	Metadata             []*domain.Metadata
+	MetadataKeysToRemove []string
 
 	Password *Password
 
@@ -43,23 +48,23 @@ type Profile struct {
 
 type Password struct {
 	// Either you have to have permission, a password code or the old password to change
-	PasswordCode        *string
-	OldPassword         *string
-	Password            *string
-	EncodedPasswordHash *string
+	PasswordCode        string
+	OldPassword         string
+	Password            string
+	EncodedPasswordHash string
 
 	ChangeRequired bool
 }
 
-func (h *ChangeHuman) Validate(hasher *crypto.PasswordHasher) (err error) {
+func (h *ChangeHuman) Validate(hasher *crypto.Hasher) (err error) {
 	if h.Email != nil && h.Email.Address != "" {
 		if err := h.Email.Validate(); err != nil {
 			return err
 		}
 	}
 
-	if h.Phone != nil && h.Phone.Number != "" {
-		if h.Phone.Number, err = h.Phone.Number.Normalize(); err != nil {
+	if h.Phone != nil {
+		if err := h.Phone.Validate(); err != nil {
 			return err
 		}
 	}
@@ -72,13 +77,13 @@ func (h *ChangeHuman) Validate(hasher *crypto.PasswordHasher) (err error) {
 	return nil
 }
 
-func (p *Password) Validate(hasher *crypto.PasswordHasher) error {
-	if p.EncodedPasswordHash != nil {
-		if !hasher.EncodingSupported(*p.EncodedPasswordHash) {
+func (p *Password) Validate(hasher *crypto.Hasher) error {
+	if p.EncodedPasswordHash != "" {
+		if !hasher.EncodingSupported(p.EncodedPasswordHash) {
 			return zerrors.ThrowInvalidArgument(nil, "USER-oz74onzvqr", "Errors.User.Password.NotSupported")
 		}
 	}
-	if p.Password == nil && p.EncodedPasswordHash == nil {
+	if p.Password == "" && p.EncodedPasswordHash == "" {
 		return zerrors.ThrowInvalidArgument(nil, "COMMAND-3klek4sbns", "Errors.User.Password.Empty")
 	}
 	return nil
@@ -98,6 +103,15 @@ func (h *ChangeHuman) Changed() bool {
 		return true
 	}
 	if h.Password != nil {
+		return true
+	}
+	if h.State != nil {
+		return true
+	}
+	if len(h.Metadata) > 0 {
+		return true
+	}
+	if len(h.MetadataKeysToRemove) > 0 {
 		return true
 	}
 	return false
@@ -131,8 +145,10 @@ func (c *Commands) AddUserHuman(ctx context.Context, resourceOwner string, human
 		return zerrors.ThrowPreconditionFailed(nil, "COMMAND-7yiox1isql", "Errors.User.AlreadyExisting")
 	}
 	// check for permission to create user on resourceOwner
-	if err := c.checkPermission(ctx, domain.PermissionUserWrite, resourceOwner, human.ID); err != nil {
-		return err
+	if !human.Register {
+		if err := c.checkPermission(ctx, domain.PermissionUserWrite, resourceOwner, human.ID); err != nil {
+			return err
+		}
 	}
 	// add resourceowner for the events with the aggregate
 	existingHuman.ResourceOwner = resourceOwner
@@ -159,6 +175,7 @@ func (c *Commands) AddUserHuman(ctx context.Context, resourceOwner string, human
 			human.Gender,
 			human.Email.Address,
 			domainPolicy.UserLoginMustBeDomain,
+			human.UserAgentID,
 		)
 	} else {
 		createCmd = user.NewHumanAddedEvent(
@@ -215,6 +232,21 @@ func (c *Commands) AddUserHuman(ctx context.Context, resourceOwner string, human
 		cmds = append(cmds, cmd)
 	}
 
+	if human.TOTPSecret != "" {
+		encryptedSecret, err := crypto.Encrypt([]byte(human.TOTPSecret), c.multifactors.OTP.CryptoMFA)
+		if err != nil {
+			return err
+		}
+		cmds = append(cmds,
+			user.NewHumanOTPAddedEvent(ctx, &existingHuman.Aggregate().Aggregate, encryptedSecret),
+			user.NewHumanOTPVerifiedEvent(ctx, &existingHuman.Aggregate().Aggregate, ""),
+		)
+	}
+
+	if human.SetInactive {
+		cmds = append(cmds, user.NewUserDeactivatedEvent(ctx, &existingHuman.Aggregate().Aggregate))
+	}
+
 	if len(cmds) == 0 {
 		human.Details = writeModelToObjectDetails(&existingHuman.WriteModel)
 		return nil
@@ -233,21 +265,20 @@ func (c *Commands) ChangeUserHuman(ctx context.Context, human *ChangeHuman, alg 
 		return err
 	}
 
-	existingHuman, err := c.userHumanWriteModel(
+	existingHuman, err := c.UserHumanWriteModel(
 		ctx,
 		human.ID,
+		human.ResourceOwner,
 		human.Profile != nil,
 		human.Email != nil,
 		human.Phone != nil,
 		human.Password != nil,
 		false, // avatar not updateable
 		false, // IDPLinks not updateable
+		len(human.Metadata) > 0 || len(human.MetadataKeysToRemove) > 0,
 	)
 	if err != nil {
 		return err
-	}
-	if !isUserStateExists(existingHuman.UserState) {
-		return zerrors.ThrowNotFound(nil, "COMMAND-ugjs0upun6", "Errors.User.NotFound")
 	}
 
 	if human.Changed() {
@@ -256,6 +287,7 @@ func (c *Commands) ChangeUserHuman(ctx context.Context, human *ChangeHuman, alg 
 		}
 	}
 
+	userAgg := UserAggregateFromWriteModelCtx(ctx, &existingHuman.WriteModel)
 	cmds := make([]eventstore.Command, 0)
 	if human.Username != nil {
 		cmds, err = c.changeUsername(ctx, cmds, existingHuman, *human.Username)
@@ -282,9 +314,61 @@ func (c *Commands) ChangeUserHuman(ctx context.Context, human *ChangeHuman, alg 
 		}
 	}
 	if human.Password != nil {
-		cmds, err = c.changeUserPassword(ctx, cmds, existingHuman, human.Password, alg)
+		cmds, err = c.changeUserPassword(ctx, cmds, existingHuman, human.Password)
 		if err != nil {
 			return err
+		}
+	}
+
+	for _, md := range human.Metadata {
+		cmd, err := c.setUserMetadata(ctx, userAgg, md)
+		if err != nil {
+			return err
+		}
+
+		cmds = append(cmds, cmd)
+	}
+
+	for _, mdKey := range human.MetadataKeysToRemove {
+		cmd, err := c.removeUserMetadata(ctx, userAgg, mdKey)
+		if err != nil {
+			return err
+		}
+
+		cmds = append(cmds, cmd)
+	}
+
+	if human.State != nil {
+		// only allow toggling between active and inactive
+		// any other target state is not supported
+		// the existing human's state has to be the
+		switch {
+		case isUserStateActive(*human.State):
+			if isUserStateActive(existingHuman.UserState) {
+				// user is already active => no change needed
+				break
+			}
+
+			// do not allow switching from other states than active (e.g. locked)
+			if !isUserStateInactive(existingHuman.UserState) {
+				return zerrors.ThrowInvalidArgumentf(nil, "USER2-statex1", "Errors.User.State.Invalid")
+			}
+
+			cmds = append(cmds, user.NewUserReactivatedEvent(ctx, &existingHuman.Aggregate().Aggregate))
+		case isUserStateInactive(*human.State):
+			if isUserStateInactive(existingHuman.UserState) {
+				// user is already inactive => no change needed
+				break
+			}
+
+			// do not allow switching from other states than active (e.g. locked)
+			if !isUserStateActive(existingHuman.UserState) {
+				return zerrors.ThrowInvalidArgumentf(nil, "USER2-statex2", "Errors.User.State.Invalid")
+			}
+
+			cmds = append(cmds, user.NewUserDeactivatedEvent(ctx, &existingHuman.Aggregate().Aggregate))
+		default:
+			return zerrors.ThrowInvalidArgumentf(nil, "USER2-statex3", "Errors.User.State.Invalid")
 		}
 	}
 
@@ -314,7 +398,7 @@ func (c *Commands) changeUserEmail(ctx context.Context, cmds []eventstore.Comman
 			if err != nil {
 				return cmds, code, err
 			}
-			cmds = append(cmds, user.NewHumanEmailCodeAddedEventV2(ctx, &wm.Aggregate().Aggregate, cryptoCode.Crypted, cryptoCode.Expiry, email.URLTemplate, email.ReturnCode))
+			cmds = append(cmds, user.NewHumanEmailCodeAddedEventV2(ctx, &wm.Aggregate().Aggregate, cryptoCode.Crypted, cryptoCode.Expiry, email.URLTemplate, email.ReturnCode, ""))
 			if email.ReturnCode {
 				code = &cryptoCode.Plain
 			}
@@ -332,23 +416,28 @@ func (c *Commands) changeUserPhone(ctx context.Context, cmds []eventstore.Comman
 	ctx, span := tracing.NewSpan(ctx)
 	defer func() { span.End() }()
 
+	if phone.Remove {
+		return append(cmds, user.NewHumanPhoneRemovedEvent(ctx, &wm.Aggregate().Aggregate)), nil, nil
+	}
+
 	if phone.Number != "" && phone.Number != wm.Phone {
 		cmds = append(cmds, user.NewHumanPhoneChangedEvent(ctx, &wm.Aggregate().Aggregate, phone.Number))
 
 		if phone.Verified {
 			return append(cmds, user.NewHumanPhoneVerifiedEvent(ctx, &wm.Aggregate().Aggregate)), code, nil
 		} else {
-			cryptoCode, err := c.newPhoneCode(ctx, c.eventstore.Filter, alg) //nolint:staticcheck
+			cryptoCode, generatorID, err := c.newPhoneCode(ctx, c.eventstore.Filter, domain.SecretGeneratorTypeVerifyPhoneCode, alg, c.defaultSecretGenerators.PhoneVerificationCode) //nolint:staticcheck
 			if err != nil {
 				return cmds, code, err
 			}
-			cmds = append(cmds, user.NewHumanPhoneCodeAddedEventV2(ctx, &wm.Aggregate().Aggregate, cryptoCode.Crypted, cryptoCode.Expiry, phone.ReturnCode))
+			cmds = append(cmds, user.NewHumanPhoneCodeAddedEventV2(ctx, &wm.Aggregate().Aggregate, cryptoCode.CryptedCode(), cryptoCode.CodeExpiry(), phone.ReturnCode, generatorID))
 			if phone.ReturnCode {
 				code = &cryptoCode.Plain
 			}
 			return cmds, code, nil
 		}
 	}
+
 	// only create separate event of verified if email was not changed
 	if phone.Verified && wm.IsPhoneVerified != phone.Verified {
 		return append(cmds, user.NewHumanPhoneVerifiedEvent(ctx, &wm.Aggregate().Aggregate)), code, nil
@@ -367,57 +456,63 @@ func changeUserProfile(ctx context.Context, cmds []eventstore.Command, wm *UserV
 	return cmds, err
 }
 
-func (c *Commands) changeUserPassword(ctx context.Context, cmds []eventstore.Command, wm *UserV2WriteModel, password *Password, alg crypto.EncryptionAlgorithm) ([]eventstore.Command, error) {
+func (c *Commands) changeUserPassword(ctx context.Context, cmds []eventstore.Command, wm *UserV2WriteModel, password *Password) ([]eventstore.Command, error) {
 	ctx, span := tracing.NewSpan(ctx)
 	defer func() { span.End() }()
 
-	// Either have a code to set the password
-	if password.PasswordCode != nil {
-		if err := crypto.VerifyCodeWithAlgorithm(wm.PasswordCodeCreationDate, wm.PasswordCodeExpiry, wm.PasswordCode, *password.PasswordCode, alg); err != nil {
-			return cmds, err
-		}
+	// if no verification is set, the user must have the permission to change the password
+	verification := c.setPasswordWithPermission(wm.AggregateID, wm.ResourceOwner)
+	// otherwise check the password code...
+	if password.PasswordCode != "" {
+		verification = c.setPasswordWithVerifyCode(
+			wm.PasswordCodeCreationDate,
+			wm.PasswordCodeExpiry,
+			wm.PasswordCode,
+			wm.PasswordCodeGeneratorID,
+			wm.PasswordCodeVerificationID,
+			password.PasswordCode,
+		)
 	}
-	var encodedPassword string
-	// or have the old password to change it
-	if password.OldPassword != nil {
-		// newly encode old password if no new and already encoded password is set
-		pw := *password.OldPassword
-		if password.Password != nil {
-			pw = *password.Password
-		}
-		alreadyEncodedPassword, err := c.verifyAndUpdatePassword(ctx, wm.PasswordEncodedHash, *password.OldPassword, pw)
-		if err != nil {
-			return cmds, err
-		}
-		encodedPassword = alreadyEncodedPassword
+	// ...or old password
+	if password.OldPassword != "" {
+		verification = c.checkCurrentPassword(password.Password, password.EncodedPasswordHash, password.OldPassword, wm.PasswordEncodedHash)
+	}
+	cmd, err := c.setPasswordCommand(
+		ctx,
+		&wm.Aggregate().Aggregate,
+		wm.UserState,
+		password.Password,
+		password.EncodedPasswordHash,
+		"",
+		password.ChangeRequired,
+		verification,
+	)
+	if cmd != nil {
+		return append(cmds, cmd), err
+	}
+	return cmds, err
+}
+
+func (c *Commands) HumanMFAInitSkippedV2(ctx context.Context, userID string) (*domain.ObjectDetails, error) {
+	if userID == "" {
+		return nil, zerrors.ThrowInvalidArgument(nil, "COMMAND-Wei5kooz1i", "Errors.User.UserIDMissing")
 	}
 
-	// password already hashed in request
-	if password.EncodedPasswordHash != nil {
-		cmd, err := c.setPasswordCommand(ctx, &wm.Aggregate().Aggregate, wm.UserState, *password.EncodedPasswordHash, "", password.ChangeRequired, true)
-		if cmd != nil {
-			return append(cmds, cmd), err
-		}
-		return cmds, err
+	existingHuman, err := c.userStateWriteModel(ctx, userID)
+	if err != nil {
+		return nil, err
 	}
-	// password already hashed in verify
-	if encodedPassword != "" {
-		cmd, err := c.setPasswordCommand(ctx, &wm.Aggregate().Aggregate, wm.UserState, encodedPassword, "", password.ChangeRequired, true)
-		if cmd != nil {
-			return append(cmds, cmd), err
-		}
-		return cmds, err
+	if !isUserStateExists(existingHuman.UserState) {
+		return nil, zerrors.ThrowNotFound(nil, "COMMAND-auj6jeBei4", "Errors.User.NotFound")
 	}
-	// password still to be hashed
-	if password.Password != nil {
-		cmd, err := c.setPasswordCommand(ctx, &wm.Aggregate().Aggregate, wm.UserState, *password.Password, "", password.ChangeRequired, false)
-		if cmd != nil {
-			return append(cmds, cmd), err
-		}
-		return cmds, err
+	if err := c.checkPermissionUpdateUser(ctx, existingHuman.ResourceOwner, existingHuman.AggregateID); err != nil {
+		return nil, err
 	}
-	// no password changes necessary
-	return cmds, nil
+
+	if err := c.pushAppendAndReduce(ctx, existingHuman, user.NewHumanMFAInitSkippedEvent(ctx, &existingHuman.Aggregate().Aggregate)); err != nil {
+		return nil, err
+	}
+	return writeModelToObjectDetails(&existingHuman.WriteModel), nil
 }
 
 func (c *Commands) userExistsWriteModel(ctx context.Context, userID string) (writeModel *UserV2WriteModel, err error) {
@@ -432,26 +527,19 @@ func (c *Commands) userExistsWriteModel(ctx context.Context, userID string) (wri
 	return writeModel, nil
 }
 
-func (c *Commands) userHumanWriteModel(ctx context.Context, userID string, profileWM, emailWM, phoneWM, passwordWM, avatarWM, idpLinksWM bool) (writeModel *UserV2WriteModel, err error) {
+func (c *Commands) UserHumanWriteModel(ctx context.Context, userID, resourceOwner string, profileWM, emailWM, phoneWM, passwordWM, avatarWM, idpLinksWM, metadataWM bool) (writeModel *UserV2WriteModel, err error) {
 	ctx, span := tracing.NewSpan(ctx)
 	defer func() { span.EndWithError(err) }()
 
-	writeModel = NewUserHumanWriteModel(userID, "", profileWM, emailWM, phoneWM, passwordWM, avatarWM, idpLinksWM)
+	writeModel = NewUserHumanWriteModel(userID, resourceOwner, profileWM, emailWM, phoneWM, passwordWM, avatarWM, idpLinksWM, metadataWM)
 	err = c.eventstore.FilterToQueryReducer(ctx, writeModel)
 	if err != nil {
 		return nil, err
 	}
-	return writeModel, nil
-}
 
-func (c *Commands) orgDomainVerifiedWriteModel(ctx context.Context, domain string) (writeModel *OrgDomainVerifiedWriteModel, err error) {
-	ctx, span := tracing.NewSpan(ctx)
-	defer func() { span.EndWithError(err) }()
-
-	writeModel = NewOrgDomainVerifiedWriteModel(domain)
-	err = c.eventstore.FilterToQueryReducer(ctx, writeModel)
-	if err != nil {
-		return nil, err
+	if !isUserStateExists(writeModel.UserState) {
+		return nil, zerrors.ThrowNotFound(nil, "COMMAND-ugjs0upun6", "Errors.User.NotFound")
 	}
+
 	return writeModel, nil
 }

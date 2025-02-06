@@ -3,10 +3,10 @@ package query
 import (
 	"time"
 
+	sq "github.com/Masterminds/squirrel"
+
 	"github.com/zitadel/zitadel/internal/database"
 	"github.com/zitadel/zitadel/internal/domain"
-
-	sq "github.com/Masterminds/squirrel"
 )
 
 type MembersQuery struct {
@@ -47,11 +47,11 @@ type Members struct {
 }
 
 type Member struct {
-	CreationDate  time.Time
-	ChangeDate    time.Time
-	Sequence      uint64
-	ResourceOwner string
-
+	CreationDate       time.Time
+	ChangeDate         time.Time
+	Sequence           uint64
+	ResourceOwner      string
+	UserResourceOwner  string
 	UserID             string
 	Roles              database.TextArray[string]
 	PreferredLoginName string

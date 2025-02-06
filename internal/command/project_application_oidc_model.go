@@ -2,7 +2,7 @@ package command
 
 import (
 	"context"
-	"reflect"
+	"slices"
 	"time"
 
 	"github.com/zitadel/zitadel/internal/crypto"
@@ -17,7 +17,7 @@ type OIDCApplicationWriteModel struct {
 	AppID                    string
 	AppName                  string
 	ClientID                 string
-	ClientSecret             *crypto.CryptoValue
+	HashedSecret             string
 	ClientSecretString       string
 	RedirectUris             []string
 	ResponseTypes            []domain.OIDCResponseType
@@ -36,6 +36,9 @@ type OIDCApplicationWriteModel struct {
 	State                    domain.AppState
 	AdditionalOrigins        []string
 	SkipNativeAppSuccessPage bool
+	BackChannelLogoutURI     string
+	LoginVersion             domain.LoginVersion
+	LoginBaseURI             string
 	oidc                     bool
 }
 
@@ -100,6 +103,11 @@ func (wm *OIDCApplicationWriteModel) AppendEvents(events ...eventstore.Event) {
 				continue
 			}
 			wm.WriteModel.AppendEvents(e)
+		case *project.OIDCConfigSecretHashUpdatedEvent:
+			if e.AppID != wm.AppID {
+				continue
+			}
+			wm.WriteModel.AppendEvents(e)
 		case *project.ProjectRemovedEvent:
 			wm.WriteModel.AppendEvents(e)
 		}
@@ -131,7 +139,9 @@ func (wm *OIDCApplicationWriteModel) Reduce() error {
 		case *project.OIDCConfigChangedEvent:
 			wm.appendChangeOIDCEvent(e)
 		case *project.OIDCConfigSecretChangedEvent:
-			wm.ClientSecret = e.ClientSecret
+			wm.HashedSecret = crypto.SecretOrEncodedHash(e.ClientSecret, e.HashedSecret)
+		case *project.OIDCConfigSecretHashUpdatedEvent:
+			wm.HashedSecret = e.HashedSecret
 		case *project.ProjectRemovedEvent:
 			wm.State = domain.AppStateRemoved
 		}
@@ -142,7 +152,7 @@ func (wm *OIDCApplicationWriteModel) Reduce() error {
 func (wm *OIDCApplicationWriteModel) appendAddOIDCEvent(e *project.OIDCConfigAddedEvent) {
 	wm.oidc = true
 	wm.ClientID = e.ClientID
-	wm.ClientSecret = e.ClientSecret
+	wm.HashedSecret = crypto.SecretOrEncodedHash(e.ClientSecret, e.HashedSecret)
 	wm.RedirectUris = e.RedirectUris
 	wm.ResponseTypes = e.ResponseTypes
 	wm.GrantTypes = e.GrantTypes
@@ -158,6 +168,9 @@ func (wm *OIDCApplicationWriteModel) appendAddOIDCEvent(e *project.OIDCConfigAdd
 	wm.ClockSkew = e.ClockSkew
 	wm.AdditionalOrigins = e.AdditionalOrigins
 	wm.SkipNativeAppSuccessPage = e.SkipNativeAppSuccessPage
+	wm.BackChannelLogoutURI = e.BackChannelLogoutURI
+	wm.LoginVersion = e.LoginVersion
+	wm.LoginBaseURI = e.LoginBaseURI
 }
 
 func (wm *OIDCApplicationWriteModel) appendChangeOIDCEvent(e *project.OIDCConfigChangedEvent) {
@@ -206,6 +219,15 @@ func (wm *OIDCApplicationWriteModel) appendChangeOIDCEvent(e *project.OIDCConfig
 	if e.SkipNativeAppSuccessPage != nil {
 		wm.SkipNativeAppSuccessPage = *e.SkipNativeAppSuccessPage
 	}
+	if e.BackChannelLogoutURI != nil {
+		wm.BackChannelLogoutURI = *e.BackChannelLogoutURI
+	}
+	if e.LoginVersion != nil {
+		wm.LoginVersion = *e.LoginVersion
+	}
+	if e.LoginBaseURI != nil {
+		wm.LoginBaseURI = *e.LoginBaseURI
+	}
 }
 
 func (wm *OIDCApplicationWriteModel) Query() *eventstore.SearchQueryBuilder {
@@ -223,8 +245,9 @@ func (wm *OIDCApplicationWriteModel) Query() *eventstore.SearchQueryBuilder {
 			project.OIDCConfigAddedType,
 			project.OIDCConfigChangedType,
 			project.OIDCConfigSecretChangedType,
-			project.ProjectRemovedType).
-		Builder()
+			project.OIDCConfigSecretHashUpdatedType,
+			project.ProjectRemovedType,
+		).Builder()
 }
 
 func (wm *OIDCApplicationWriteModel) NewChangedEvent(
@@ -246,17 +269,20 @@ func (wm *OIDCApplicationWriteModel) NewChangedEvent(
 	clockSkew time.Duration,
 	additionalOrigins []string,
 	skipNativeAppSuccessPage bool,
+	backChannelLogoutURI string,
+	loginVersion domain.LoginVersion,
+	loginBaseURI string,
 ) (*project.OIDCConfigChangedEvent, bool, error) {
 	changes := make([]project.OIDCConfigChanges, 0)
 	var err error
 
-	if !reflect.DeepEqual(wm.RedirectUris, redirectURIS) {
+	if !slices.Equal(wm.RedirectUris, redirectURIS) {
 		changes = append(changes, project.ChangeRedirectURIs(redirectURIS))
 	}
-	if !reflect.DeepEqual(wm.ResponseTypes, responseTypes) {
+	if !slices.Equal(wm.ResponseTypes, responseTypes) {
 		changes = append(changes, project.ChangeResponseTypes(responseTypes))
 	}
-	if !reflect.DeepEqual(wm.GrantTypes, grantTypes) {
+	if !slices.Equal(wm.GrantTypes, grantTypes) {
 		changes = append(changes, project.ChangeGrantTypes(grantTypes))
 	}
 	if wm.ApplicationType != appType {
@@ -265,7 +291,7 @@ func (wm *OIDCApplicationWriteModel) NewChangedEvent(
 	if wm.AuthMethodType != authMethodType {
 		changes = append(changes, project.ChangeAuthMethodType(authMethodType))
 	}
-	if !reflect.DeepEqual(wm.PostLogoutRedirectUris, postLogoutRedirectURIs) {
+	if !slices.Equal(wm.PostLogoutRedirectUris, postLogoutRedirectURIs) {
 		changes = append(changes, project.ChangePostLogoutRedirectURIs(postLogoutRedirectURIs))
 	}
 	if wm.OIDCVersion != oidcVersion {
@@ -289,11 +315,20 @@ func (wm *OIDCApplicationWriteModel) NewChangedEvent(
 	if wm.ClockSkew != clockSkew {
 		changes = append(changes, project.ChangeClockSkew(clockSkew))
 	}
-	if !reflect.DeepEqual(wm.AdditionalOrigins, additionalOrigins) {
+	if !slices.Equal(wm.AdditionalOrigins, additionalOrigins) {
 		changes = append(changes, project.ChangeAdditionalOrigins(additionalOrigins))
 	}
 	if wm.SkipNativeAppSuccessPage != skipNativeAppSuccessPage {
 		changes = append(changes, project.ChangeSkipNativeAppSuccessPage(skipNativeAppSuccessPage))
+	}
+	if wm.BackChannelLogoutURI != backChannelLogoutURI {
+		changes = append(changes, project.ChangeBackChannelLogoutURI(backChannelLogoutURI))
+	}
+	if wm.LoginVersion != loginVersion {
+		changes = append(changes, project.ChangeLoginVersion(loginVersion))
+	}
+	if wm.LoginBaseURI != loginBaseURI {
+		changes = append(changes, project.ChangeLoginBaseURI(loginBaseURI))
 	}
 
 	if len(changes) == 0 {

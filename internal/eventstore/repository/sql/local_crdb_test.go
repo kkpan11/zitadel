@@ -8,11 +8,14 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach-go/v2/testserver"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/zitadel/logging"
 
 	"github.com/zitadel/zitadel/cmd/initialise"
 	"github.com/zitadel/zitadel/internal/database"
 	"github.com/zitadel/zitadel/internal/database/cockroach"
+	new_es "github.com/zitadel/zitadel/internal/eventstore/v3"
 )
 
 var (
@@ -20,15 +23,27 @@ var (
 )
 
 func TestMain(m *testing.M) {
-	ts, err := testserver.NewTestServer(testserver.CustomVersionOpt(os.Getenv("ZITADEL_CRDB_VERSION")))
+	opts := make([]testserver.TestServerOpt, 0, 1)
+	if version := os.Getenv("ZITADEL_CRDB_VERSION"); version != "" {
+		opts = append(opts, testserver.CustomVersionOpt(version))
+	}
+	ts, err := testserver.NewTestServer(opts...)
 	if err != nil {
 		logging.WithFields("error", err).Fatal("unable to start db")
 	}
 
-	testCRDBClient, err = sql.Open("postgres", ts.PGURL().String())
+	connConfig, err := pgxpool.ParseConfig(ts.PGURL().String())
 	if err != nil {
-		logging.WithFields("error", err).Fatal("unable to connect to db")
+		logging.WithFields("error", err).Fatal("unable to parse db url")
 	}
+	connConfig.AfterConnect = new_es.RegisterEventstoreTypes
+	pool, err := pgxpool.NewWithConfig(context.Background(), connConfig)
+	if err != nil {
+		logging.WithFields("error", err).Fatal("unable to create db pool")
+	}
+
+	testCRDBClient = stdlib.OpenDBFromPool(pool)
+
 	if err = testCRDBClient.Ping(); err != nil {
 		logging.WithFields("error", err).Fatal("unable to ping db")
 	}
@@ -38,14 +53,14 @@ func TestMain(m *testing.M) {
 		ts.Stop()
 	}()
 
-	if err = initDB(&database.DB{DB: testCRDBClient, Database: &cockroach.Config{Database: "zitadel"}}); err != nil {
+	if err = initDB(context.Background(), &database.DB{DB: testCRDBClient, Database: &cockroach.Config{Database: "zitadel"}}); err != nil {
 		logging.WithFields("error", err).Fatal("migrations failed")
 	}
 
 	os.Exit(m.Run())
 }
 
-func initDB(db *database.DB) error {
+func initDB(ctx context.Context, db *database.DB) error {
 	config := new(database.Config)
 	config.SetConnector(&cockroach.Config{User: cockroach.User{Username: "zitadel"}, Database: "zitadel"})
 
@@ -53,10 +68,11 @@ func initDB(db *database.DB) error {
 		return err
 	}
 
-	err := initialise.Init(db,
+	err := initialise.Init(ctx, db,
 		initialise.VerifyUser(config.Username(), ""),
 		initialise.VerifyDatabase(config.DatabaseName()),
-		initialise.VerifyGrant(config.DatabaseName(), config.Username()))
+		initialise.VerifyGrant(config.DatabaseName(), config.Username()),
+		initialise.VerifySettings(config.DatabaseName(), config.Username()))
 	if err != nil {
 		return err
 	}

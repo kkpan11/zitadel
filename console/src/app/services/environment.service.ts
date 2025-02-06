@@ -13,15 +13,20 @@ export interface Environment {
   issuer: string;
   customer_portal?: string;
   instance_management_url?: string;
+  posthog_token?: string;
+  posthog_url?: string;
   exhausted?: boolean;
 }
 
 interface WellKnown {
   authorization_endpoint: string;
+  device_authorization_endpoint: string;
   end_session_endpoint: string;
   introspection_endpoint: string;
   token_endpoint: string;
   userinfo_endpoint: string;
+  jwks_uri: string;
+  revocation_endpoint: string;
 }
 @Injectable({
   providedIn: 'root',
@@ -34,14 +39,14 @@ export class EnvironmentService {
   public admin!: AdminServiceClient;
 
   private environment$: Observable<Environment>;
-  private wellKnown$: Observable<WellKnown>;
+  private wellknown$: Observable<WellKnown>;
 
   constructor(
     private http: HttpClient,
     private exhaustedSvc: ExhaustedService,
   ) {
     this.environment$ = this.createEnvironment();
-    this.wellKnown$ = this.createWellKnown(this.environment$);
+    this.wellknown$ = this.createWellKnown(this.environment$);
   }
 
   // env returns an `Observable<Environment>` that can be subscribed to whenever needed.
@@ -51,10 +56,10 @@ export class EnvironmentService {
     return this.environment$;
   }
 
-  // wellKnown returns an `Observable<Environment>` that can be subscribed to whenever needed.
+  // wellknown returns an `Observable<Environment>` that can be subscribed to whenever needed.
   // It makes the HTTP call exactly once and replays the cached result.
-  get wellKnown() {
-    return this.wellKnown$;
+  get wellknown() {
+    return this.wellknown$;
   }
 
   private createEnvironment() {

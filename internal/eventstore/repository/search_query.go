@@ -14,21 +14,24 @@ type SearchQuery struct {
 
 	SubQueries            [][]*Filter
 	Tx                    *sql.Tx
+	LockRows              bool
+	LockOption            eventstore.LockOption
 	AllowTimeTravel       bool
 	AwaitOpenTransactions bool
 	Limit                 uint64
 	Offset                uint32
 	Desc                  bool
 
-	InstanceID        *Filter
-	InstanceIDs       *Filter
-	ExcludedInstances *Filter
-	Creator           *Filter
-	Owner             *Filter
-	Position          *Filter
-	Sequence          *Filter
-	CreatedAfter      *Filter
-	CreatedBefore     *Filter
+	InstanceID          *Filter
+	InstanceIDs         *Filter
+	ExcludedInstances   *Filter
+	Creator             *Filter
+	Owner               *Filter
+	Position            *Filter
+	Sequence            *Filter
+	CreatedAfter        *Filter
+	CreatedBefore       *Filter
+	ExcludeAggregateIDs []*Filter
 }
 
 // Filter represents all fields needed to compare a field of an event with a value
@@ -130,6 +133,7 @@ func QueryFromBuilder(builder *eventstore.SearchQueryBuilder) (*SearchQuery, err
 		AwaitOpenTransactions: builder.GetAwaitOpenTransactions(),
 		SubQueries:            make([][]*Filter, len(builder.GetQueries())),
 	}
+	query.LockRows, query.LockOption = builder.GetLockRows()
 
 	for _, f := range []func(builder *eventstore.SearchQueryBuilder, query *SearchQuery) *Filter{
 		instanceIDFilter,
@@ -156,6 +160,7 @@ func QueryFromBuilder(builder *eventstore.SearchQueryBuilder) (*SearchQuery, err
 			aggregateIDFilter,
 			eventTypeFilter,
 			eventDataFilter,
+			eventPositionAfterFilter,
 		} {
 			filter := f(q)
 			if filter == nil {
@@ -165,6 +170,21 @@ func QueryFromBuilder(builder *eventstore.SearchQueryBuilder) (*SearchQuery, err
 				return nil, err
 			}
 			query.SubQueries[i] = append(query.SubQueries[i], filter)
+		}
+	}
+	if excludeAggregateIDs := builder.GetExcludeAggregateIDs(); excludeAggregateIDs != nil {
+		for _, f := range []func(query *eventstore.ExclusionQuery) *Filter{
+			excludeAggregateTypeFilter,
+			excludeEventTypeFilter,
+		} {
+			filter := f(excludeAggregateIDs)
+			if filter == nil {
+				continue
+			}
+			if err := filter.Validate(); err != nil {
+				return nil, err
+			}
+			query.ExcludeAggregateIDs = append(query.ExcludeAggregateIDs, filter)
 		}
 	}
 
@@ -227,7 +247,7 @@ func instanceIDsFilter(builder *eventstore.SearchQueryBuilder, query *SearchQuer
 	if builder.GetInstanceIDs() == nil {
 		return nil
 	}
-	query.InstanceIDs = NewFilter(FieldInstanceID, builder.GetInstanceIDs(), OperationIn)
+	query.InstanceIDs = NewFilter(FieldInstanceID, database.TextArray[string](builder.GetInstanceIDs()), OperationIn)
 	return query.InstanceIDs
 }
 
@@ -256,11 +276,7 @@ func eventTypeFilter(query *eventstore.SearchQuery) *Filter {
 	if len(query.GetEventTypes()) == 1 {
 		return NewFilter(FieldEventType, query.GetEventTypes()[0], OperationEquals)
 	}
-	eventTypes := make(database.TextArray[eventstore.EventType], len(query.GetEventTypes()))
-	for i, eventType := range query.GetEventTypes() {
-		eventTypes[i] = eventType
-	}
-	return NewFilter(FieldEventType, eventTypes, OperationIn)
+	return NewFilter(FieldEventType, database.TextArray[eventstore.EventType](query.GetEventTypes()), OperationIn)
 }
 
 func aggregateTypeFilter(query *eventstore.SearchQuery) *Filter {
@@ -270,11 +286,7 @@ func aggregateTypeFilter(query *eventstore.SearchQuery) *Filter {
 	if len(query.GetAggregateTypes()) == 1 {
 		return NewFilter(FieldAggregateType, query.GetAggregateTypes()[0], OperationEquals)
 	}
-	aggregateTypes := make(database.TextArray[eventstore.AggregateType], len(query.GetAggregateTypes()))
-	for i, aggregateType := range query.GetAggregateTypes() {
-		aggregateTypes[i] = aggregateType
-	}
-	return NewFilter(FieldAggregateType, aggregateTypes, OperationIn)
+	return NewFilter(FieldAggregateType, database.TextArray[eventstore.AggregateType](query.GetAggregateTypes()), OperationIn)
 }
 
 func eventDataFilter(query *eventstore.SearchQuery) *Filter {
@@ -282,4 +294,31 @@ func eventDataFilter(query *eventstore.SearchQuery) *Filter {
 		return nil
 	}
 	return NewFilter(FieldEventData, query.GetEventData(), OperationJSONContains)
+}
+
+func eventPositionAfterFilter(query *eventstore.SearchQuery) *Filter {
+	if pos := query.GetPositionAfter(); pos != 0 {
+		return NewFilter(FieldPosition, pos, OperationGreater)
+	}
+	return nil
+}
+
+func excludeEventTypeFilter(query *eventstore.ExclusionQuery) *Filter {
+	if len(query.GetEventTypes()) < 1 {
+		return nil
+	}
+	if len(query.GetEventTypes()) == 1 {
+		return NewFilter(FieldEventType, query.GetEventTypes()[0], OperationEquals)
+	}
+	return NewFilter(FieldEventType, database.TextArray[eventstore.EventType](query.GetEventTypes()), OperationIn)
+}
+
+func excludeAggregateTypeFilter(query *eventstore.ExclusionQuery) *Filter {
+	if len(query.GetAggregateTypes()) < 1 {
+		return nil
+	}
+	if len(query.GetAggregateTypes()) == 1 {
+		return NewFilter(FieldAggregateType, query.GetAggregateTypes()[0], OperationEquals)
+	}
+	return NewFilter(FieldAggregateType, database.TextArray[eventstore.AggregateType](query.GetAggregateTypes()), OperationIn)
 }

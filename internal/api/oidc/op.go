@@ -3,12 +3,12 @@ package oidc
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/zitadel/oidc/v3/pkg/oidc"
 	"github.com/zitadel/oidc/v3/pkg/op"
-	"golang.org/x/exp/slog"
 
 	"github.com/zitadel/zitadel/internal/api/assets"
 	http_utils "github.com/zitadel/zitadel/internal/api/http"
@@ -31,19 +31,17 @@ type Config struct {
 	AuthMethodPrivateKeyJWT           bool
 	GrantTypeRefreshToken             bool
 	RequestObjectSupported            bool
-	SigningKeyAlgorithm               string
 	DefaultAccessTokenLifetime        time.Duration
 	DefaultIdTokenLifetime            time.Duration
 	DefaultRefreshTokenIdleExpiration time.Duration
 	DefaultRefreshTokenExpiration     time.Duration
-	UserAgentCookieConfig             *middleware.UserAgentCookieConfig
-	Cache                             *middleware.CacheConfig
+	JWKSCacheControlMaxAge            time.Duration
 	CustomEndpoints                   *EndpointConfig
 	DeviceAuth                        *DeviceAuthorizationConfig
 	DefaultLoginURLV2                 string
 	DefaultLogoutURLV2                string
-	Features                          Features
 	PublicKeyCacheMaxAge              time.Duration
+	DefaultBackChannelLogoutLifetime  time.Duration
 }
 
 type EndpointConfig struct {
@@ -62,11 +60,6 @@ type Endpoint struct {
 	URL  string
 }
 
-type Features struct {
-	TriggerIntrospectionProjections bool
-	LegacyIntrospection             bool
-}
-
 type OPStorage struct {
 	repo                              repository.Repository
 	command                           *command.Commands
@@ -77,7 +70,6 @@ type OPStorage struct {
 	defaultLogoutURLV2                string
 	defaultAccessTokenLifetime        time.Duration
 	defaultIdTokenLifetime            time.Duration
-	signingKeyAlgorithm               string
 	defaultRefreshTokenIdleExpiration time.Duration
 	defaultRefreshTokenExpiration     time.Duration
 	encAlg                            crypto.EncryptionAlgorithm
@@ -85,7 +77,29 @@ type OPStorage struct {
 	assetAPIPrefix                    func(ctx context.Context) string
 }
 
+// Provider is used to overload certain [op.Provider] methods
+type Provider struct {
+	*op.Provider
+	accessTokenKeySet oidc.KeySet
+	idTokenHintKeySet oidc.KeySet
+}
+
+// IDTokenHintVerifier configures a Verifier and supported signing algorithms based on the Web Key feature in the context.
+func (o *Provider) IDTokenHintVerifier(ctx context.Context) *op.IDTokenHintVerifier {
+	return op.NewIDTokenHintVerifier(op.IssuerFromContext(ctx), o.idTokenHintKeySet, op.WithSupportedIDTokenHintSigningAlgorithms(
+		supportedSigningAlgs(ctx)...,
+	))
+}
+
+// AccessTokenVerifier configures a Verifier and supported signing algorithms based on the Web Key feature in the context.
+func (o *Provider) AccessTokenVerifier(ctx context.Context) *op.AccessTokenVerifier {
+	return op.NewAccessTokenVerifier(op.IssuerFromContext(ctx), o.accessTokenKeySet, op.WithSupportedAccessTokenSigningAlgorithms(
+		supportedSigningAlgs(ctx)...,
+	))
+}
+
 func NewServer(
+	ctx context.Context,
 	config Config,
 	defaultLogoutRedirectURI string,
 	externalSecure bool,
@@ -99,36 +113,40 @@ func NewServer(
 	userAgentCookie, instanceHandler func(http.Handler) http.Handler,
 	accessHandler *middleware.AccessInterceptor,
 	fallbackLogger *slog.Logger,
+	hashConfig crypto.HashConfig,
 ) (*Server, error) {
 	opConfig, err := createOPConfig(config, defaultLogoutRedirectURI, cryptoKey)
 	if err != nil {
 		return nil, zerrors.ThrowInternal(err, "OIDC-EGrqd", "cannot create op config: %w")
 	}
-	storage := newStorage(config, command, query, repo, encryptionAlg, es, projections, externalSecure)
-	keyCache := newPublicKeyCache(context.TODO(), config.PublicKeyCacheMaxAge, query.GetPublicKeyByID)
+	storage := newStorage(config, command, query, repo, encryptionAlg, es, projections)
+	keyCache := newPublicKeyCache(ctx, config.PublicKeyCacheMaxAge, queryKeyFunc(query))
 	accessTokenKeySet := newOidcKeySet(keyCache, withKeyExpiryCheck(true))
 	idTokenHintKeySet := newOidcKeySet(keyCache)
 
-	options := []op.Option{
-		op.WithAccessTokenKeySet(accessTokenKeySet),
-		op.WithIDTokenHintKeySet(idTokenHintKeySet),
-	}
+	var options []op.Option
 	if !externalSecure {
 		options = append(options, op.WithAllowInsecure())
 	}
 	provider, err := op.NewProvider(
 		opConfig,
 		storage,
-		op.IssuerFromForwardedOrHost("", op.WithIssuerFromCustomHeaders("forwarded", "x-zitadel-forwarded")),
+		IssuerFromContext,
 		options...,
 	)
 	if err != nil {
 		return nil, zerrors.ThrowInternal(err, "OIDC-DAtg3", "cannot create provider")
 	}
-
+	hasher, err := hashConfig.NewHasher()
+	if err != nil {
+		return nil, zerrors.ThrowInternal(err, "OIDC-Aij4e", "cannot create secret hasher")
+	}
 	server := &Server{
-		LegacyServer:               op.NewLegacyServer(provider, endpoints(config.CustomEndpoints)),
-		features:                   config.Features,
+		LegacyServer: op.NewLegacyServer(&Provider{
+			Provider:          provider,
+			accessTokenKeySet: accessTokenKeySet,
+			idTokenHintKeySet: idTokenHintKeySet,
+		}, endpoints(config.CustomEndpoints)),
 		repo:                       repo,
 		query:                      query,
 		command:                    command,
@@ -139,13 +157,16 @@ func NewServer(
 		defaultLogoutURLV2:         config.DefaultLogoutURLV2,
 		defaultAccessTokenLifetime: config.DefaultAccessTokenLifetime,
 		defaultIdTokenLifetime:     config.DefaultIdTokenLifetime,
+		jwksCacheControlMaxAge:     config.JWKSCacheControlMaxAge,
 		fallbackLogger:             fallbackLogger,
-		hashAlg:                    crypto.NewBCrypt(10), // as we are only verifying in oidc, the cost is already part of the hash string and the config here is irrelevant.
-		signingKeyAlgorithm:        config.SigningKeyAlgorithm,
-		assetAPIPrefix:             assets.AssetAPI(externalSecure),
+		hasher:                     hasher,
+		encAlg:                     encryptionAlg,
+		opCrypto:                   op.NewAESCrypto(opConfig.CryptoKey),
+		assetAPIPrefix:             assets.AssetAPI(),
 	}
 	metricTypes := []metrics.MetricType{metrics.MetricTypeRequestCount, metrics.MetricTypeStatusCode, metrics.MetricTypeTotalCount}
 	server.Handler = op.RegisterLegacyServer(server,
+		server.authorizeCallbackHandler,
 		op.WithFallbackLogger(fallbackLogger),
 		op.WithHTTPMiddleware(
 			middleware.MetricsHandler(metricTypes),
@@ -159,6 +180,12 @@ func NewServer(
 		))
 
 	return server, nil
+}
+
+func IssuerFromContext(_ bool) (op.IssuerFromRequest, error) {
+	return func(r *http.Request) string {
+		return http_utils.DomainContext(r.Context()).Origin()
+	}, nil
 }
 
 func publicAuthPathPrefixes(endpoints *EndpointConfig) []string {
@@ -193,7 +220,7 @@ func createOPConfig(config Config, defaultLogoutRedirectURI string, cryptoKey []
 	return opConfig, nil
 }
 
-func newStorage(config Config, command *command.Commands, query *query.Queries, repo repository.Repository, encAlg crypto.EncryptionAlgorithm, es *eventstore.Eventstore, db *database.DB, externalSecure bool) *OPStorage {
+func newStorage(config Config, command *command.Commands, query *query.Queries, repo repository.Repository, encAlg crypto.EncryptionAlgorithm, es *eventstore.Eventstore, db *database.DB) *OPStorage {
 	return &OPStorage{
 		repo:                              repo,
 		command:                           command,
@@ -202,14 +229,13 @@ func newStorage(config Config, command *command.Commands, query *query.Queries, 
 		defaultLoginURL:                   fmt.Sprintf("%s%s?%s=", login.HandlerPrefix, login.EndpointLogin, login.QueryAuthRequestID),
 		defaultLoginURLV2:                 config.DefaultLoginURLV2,
 		defaultLogoutURLV2:                config.DefaultLogoutURLV2,
-		signingKeyAlgorithm:               config.SigningKeyAlgorithm,
 		defaultAccessTokenLifetime:        config.DefaultAccessTokenLifetime,
 		defaultIdTokenLifetime:            config.DefaultIdTokenLifetime,
 		defaultRefreshTokenIdleExpiration: config.DefaultRefreshTokenIdleExpiration,
 		defaultRefreshTokenExpiration:     config.DefaultRefreshTokenExpiration,
 		encAlg:                            encAlg,
 		locker:                            crdb.NewLocker(db.DB, locksTable, signingKey),
-		assetAPIPrefix:                    assets.AssetAPI(externalSecure),
+		assetAPIPrefix:                    assets.AssetAPI(),
 	}
 }
 

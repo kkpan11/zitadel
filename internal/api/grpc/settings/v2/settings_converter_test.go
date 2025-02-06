@@ -12,9 +12,12 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/zitadel/zitadel/internal/api/grpc"
+	"github.com/zitadel/zitadel/internal/command"
+	"github.com/zitadel/zitadel/internal/database"
 	"github.com/zitadel/zitadel/internal/domain"
 	"github.com/zitadel/zitadel/internal/query"
-	settings "github.com/zitadel/zitadel/pkg/grpc/settings/v2beta"
+	"github.com/zitadel/zitadel/pkg/grpc/idp/v2"
+	"github.com/zitadel/zitadel/pkg/grpc/settings/v2"
 )
 
 var ignoreTypes = []protoreflect.FullName{"google.protobuf.Duration"}
@@ -33,11 +36,11 @@ func Test_loginSettingsToPb(t *testing.T) {
 		DisableLoginWithEmail:      true,
 		DisableLoginWithPhone:      true,
 		DefaultRedirectURI:         "example.com",
-		PasswordCheckLifetime:      time.Hour,
-		ExternalLoginCheckLifetime: time.Minute,
-		MFAInitSkipLifetime:        time.Millisecond,
-		SecondFactorCheckLifetime:  time.Microsecond,
-		MultiFactorCheckLifetime:   time.Nanosecond,
+		PasswordCheckLifetime:      database.Duration(time.Hour),
+		ExternalLoginCheckLifetime: database.Duration(time.Minute),
+		MFAInitSkipLifetime:        database.Duration(time.Millisecond),
+		SecondFactorCheckLifetime:  database.Duration(time.Microsecond),
+		MultiFactorCheckLifetime:   database.Duration(time.Nanosecond),
 		SecondFactors: []domain.SecondFactorType{
 			domain.SecondFactorTypeTOTP,
 			domain.SecondFactorTypeU2F,
@@ -211,7 +214,7 @@ func Test_multiFactorTypeToPb(t *testing.T) {
 	}
 }
 
-func Test_passwordSettingsToPb(t *testing.T) {
+func Test_passwordComplexitySettingsToPb(t *testing.T) {
 	arg := &query.PasswordComplexityPolicy{
 		MinLength:    12,
 		HasUppercase: true,
@@ -229,10 +232,29 @@ func Test_passwordSettingsToPb(t *testing.T) {
 		ResourceOwnerType: settings.ResourceOwnerType_RESOURCE_OWNER_TYPE_INSTANCE,
 	}
 
-	got := passwordSettingsToPb(arg)
+	got := passwordComplexitySettingsToPb(arg)
 	grpc.AllFieldsSet(t, got.ProtoReflect(), ignoreTypes...)
 	if !proto.Equal(got, want) {
-		t.Errorf("passwordSettingsToPb() =\n%v\nwant\n%v", got, want)
+		t.Errorf("passwordComplexitySettingsToPb() =\n%v\nwant\n%v", got, want)
+	}
+}
+
+func Test_passwordExpirySettingsToPb(t *testing.T) {
+	arg := &query.PasswordAgePolicy{
+		ExpireWarnDays: 80,
+		MaxAgeDays:     90,
+		IsDefault:      true,
+	}
+	want := &settings.PasswordExpirySettings{
+		ExpireWarnDays:    80,
+		MaxAgeDays:        90,
+		ResourceOwnerType: settings.ResourceOwnerType_RESOURCE_OWNER_TYPE_INSTANCE,
+	}
+
+	got := passwordExpirySettingsToPb(arg)
+	grpc.AllFieldsSet(t, got.ProtoReflect(), ignoreTypes...)
+	if !proto.Equal(got, want) {
+		t.Errorf("passwordExpirySettingsToPb() =\n%v\nwant\n%v", got, want)
 	}
 }
 
@@ -314,17 +336,23 @@ func Test_domainSettingsToPb(t *testing.T) {
 
 func Test_legalSettingsToPb(t *testing.T) {
 	arg := &query.PrivacyPolicy{
-		TOSLink:      "http://example.com/tos",
-		PrivacyLink:  "http://example.com/pricacy",
-		HelpLink:     "http://example.com/help",
-		SupportEmail: "support@zitadel.com",
-		IsDefault:    true,
+		TOSLink:        "http://example.com/tos",
+		PrivacyLink:    "http://example.com/pricacy",
+		HelpLink:       "http://example.com/help",
+		SupportEmail:   "support@zitadel.com",
+		IsDefault:      true,
+		DocsLink:       "http://example.com/docs",
+		CustomLink:     "http://example.com/custom",
+		CustomLinkText: "Custom",
 	}
 	want := &settings.LegalAndSupportSettings{
 		TosLink:           "http://example.com/tos",
 		PrivacyPolicyLink: "http://example.com/pricacy",
 		HelpLink:          "http://example.com/help",
 		SupportEmail:      "support@zitadel.com",
+		DocsLink:          "http://example.com/docs",
+		CustomLink:        "http://example.com/custom",
+		CustomLinkText:    "Custom",
 		ResourceOwnerType: settings.ResourceOwnerType_RESOURCE_OWNER_TYPE_INSTANCE,
 	}
 	got := legalAndSupportSettingsToPb(arg)
@@ -337,10 +365,12 @@ func Test_legalSettingsToPb(t *testing.T) {
 func Test_lockoutSettingsToPb(t *testing.T) {
 	arg := &query.LockoutPolicy{
 		MaxPasswordAttempts: 22,
+		MaxOTPAttempts:      22,
 		IsDefault:           true,
 	}
 	want := &settings.LockoutSettings{
 		MaxPasswordAttempts: 22,
+		MaxOtpAttempts:      22,
 		ResourceOwnerType:   settings.ResourceOwnerType_RESOURCE_OWNER_TYPE_INSTANCE,
 	}
 	got := lockoutSettingsToPb(arg)
@@ -353,14 +383,24 @@ func Test_lockoutSettingsToPb(t *testing.T) {
 func Test_identityProvidersToPb(t *testing.T) {
 	arg := []*query.IDPLoginPolicyLink{
 		{
-			IDPID:   "1",
-			IDPName: "foo",
-			IDPType: domain.IDPTypeOIDC,
+			IDPID:             "1",
+			IDPName:           "foo",
+			IDPType:           domain.IDPTypeOIDC,
+			IsCreationAllowed: true,
+			IsLinkingAllowed:  true,
+			IsAutoCreation:    true,
+			IsAutoUpdate:      true,
+			AutoLinking:       domain.AutoLinkingOptionUsername,
 		},
 		{
-			IDPID:   "2",
-			IDPName: "bar",
-			IDPType: domain.IDPTypeGitHub,
+			IDPID:             "2",
+			IDPName:           "bar",
+			IDPType:           domain.IDPTypeGitHub,
+			IsCreationAllowed: true,
+			IsLinkingAllowed:  true,
+			IsAutoCreation:    true,
+			IsAutoUpdate:      true,
+			AutoLinking:       domain.AutoLinkingOptionEmail,
 		},
 	}
 	want := []*settings.IdentityProvider{
@@ -368,11 +408,25 @@ func Test_identityProvidersToPb(t *testing.T) {
 			Id:   "1",
 			Name: "foo",
 			Type: settings.IdentityProviderType_IDENTITY_PROVIDER_TYPE_OIDC,
+			Options: &idp.Options{
+				IsCreationAllowed: true,
+				IsLinkingAllowed:  true,
+				IsAutoCreation:    true,
+				IsAutoUpdate:      true,
+				AutoLinking:       idp.AutoLinkingOption_AUTO_LINKING_OPTION_USERNAME,
+			},
 		},
 		{
 			Id:   "2",
 			Name: "bar",
 			Type: settings.IdentityProviderType_IDENTITY_PROVIDER_TYPE_GITHUB,
+			Options: &idp.Options{
+				IsCreationAllowed: true,
+				IsLinkingAllowed:  true,
+				IsAutoCreation:    true,
+				IsAutoUpdate:      true,
+				AutoLinking:       idp.AutoLinkingOption_AUTO_LINKING_OPTION_EMAIL,
+			},
 		},
 	}
 	got := identityProvidersToPb(arg)
@@ -438,6 +492,14 @@ func Test_idpTypeToPb(t *testing.T) {
 			want: settings.IdentityProviderType_IDENTITY_PROVIDER_TYPE_GOOGLE,
 		},
 		{
+			args: args{domain.IDPTypeApple},
+			want: settings.IdentityProviderType_IDENTITY_PROVIDER_TYPE_APPLE,
+		},
+		{
+			args: args{domain.IDPTypeSAML},
+			want: settings.IdentityProviderType_IDENTITY_PROVIDER_TYPE_SAML,
+		},
+		{
 			args: args{99},
 			want: settings.IdentityProviderType_IDENTITY_PROVIDER_TYPE_UNSPECIFIED,
 		},
@@ -449,4 +511,36 @@ func Test_idpTypeToPb(t *testing.T) {
 			}
 		})
 	}
+}
+
+func Test_securityPolicyToSettingsPb(t *testing.T) {
+	want := &settings.SecuritySettings{
+		EmbeddedIframe: &settings.EmbeddedIframeSettings{
+			Enabled:        true,
+			AllowedOrigins: []string{"foo", "bar"},
+		},
+		EnableImpersonation: true,
+	}
+	got := securityPolicyToSettingsPb(&query.SecurityPolicy{
+		EnableIframeEmbedding: true,
+		AllowedOrigins:        []string{"foo", "bar"},
+		EnableImpersonation:   true,
+	})
+	assert.Equal(t, want, got)
+}
+
+func Test_securitySettingsToCommand(t *testing.T) {
+	want := &command.SecurityPolicy{
+		EnableIframeEmbedding: true,
+		AllowedOrigins:        []string{"foo", "bar"},
+		EnableImpersonation:   true,
+	}
+	got := securitySettingsToCommand(&settings.SetSecuritySettingsRequest{
+		EmbeddedIframe: &settings.EmbeddedIframeSettings{
+			Enabled:        true,
+			AllowedOrigins: []string{"foo", "bar"},
+		},
+		EnableImpersonation: true,
+	})
+	assert.Equal(t, want, got)
 }

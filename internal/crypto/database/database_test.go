@@ -14,6 +14,7 @@ import (
 
 	"github.com/zitadel/zitadel/internal/crypto"
 	z_db "github.com/zitadel/zitadel/internal/database"
+	db_mock "github.com/zitadel/zitadel/internal/database/mock"
 	"github.com/zitadel/zitadel/internal/zerrors"
 )
 
@@ -452,7 +453,7 @@ type db struct {
 
 func dbMock(t *testing.T, expectations ...func(m sqlmock.Sqlmock)) db {
 	t.Helper()
-	client, mock, err := sqlmock.New()
+	client, mock, err := sqlmock.New(sqlmock.ValueConverterOption(new(db_mock.TypeConverter)))
 	if err != nil {
 		t.Fatalf("unable to create sql mock: %v", err)
 	}
@@ -467,18 +468,14 @@ func dbMock(t *testing.T, expectations ...func(m sqlmock.Sqlmock)) db {
 
 func expectQueryErr(query string, err error, args ...driver.Value) func(m sqlmock.Sqlmock) {
 	return func(m sqlmock.Sqlmock) {
-		m.ExpectBegin()
 		m.ExpectQuery(regexp.QuoteMeta(query)).WithArgs(args...).WillReturnError(err)
-		m.ExpectRollback()
 	}
 }
 
 func expectQueryScanErr(stmt string, cols []string, rows [][]driver.Value, args ...driver.Value) func(m sqlmock.Sqlmock) {
 	return func(m sqlmock.Sqlmock) {
-		m.ExpectBegin()
 		q := m.ExpectQuery(regexp.QuoteMeta(stmt)).WithArgs(args...)
-		m.ExpectRollback()
-		result := sqlmock.NewRows(cols)
+		result := m.NewRows(cols)
 		count := uint64(len(rows))
 		for _, row := range rows {
 			if cols[len(cols)-1] == "count" {
@@ -493,10 +490,8 @@ func expectQueryScanErr(stmt string, cols []string, rows [][]driver.Value, args 
 
 func expectQuery(stmt string, cols []string, rows [][]driver.Value, args ...driver.Value) func(m sqlmock.Sqlmock) {
 	return func(m sqlmock.Sqlmock) {
-		m.ExpectBegin()
 		q := m.ExpectQuery(regexp.QuoteMeta(stmt)).WithArgs(args...)
-		m.ExpectCommit()
-		result := sqlmock.NewRows(cols)
+		result := m.NewRows(cols)
 		count := uint64(len(rows))
 		for _, row := range rows {
 			if cols[len(cols)-1] == "count" {

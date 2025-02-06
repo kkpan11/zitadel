@@ -4,24 +4,17 @@ import (
 	"context"
 
 	"github.com/muhlemmer/gu"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/zitadel/zitadel/internal/api/authz"
 	"github.com/zitadel/zitadel/internal/api/grpc/object/v2"
 	"github.com/zitadel/zitadel/internal/domain"
 	"github.com/zitadel/zitadel/internal/query"
 	"github.com/zitadel/zitadel/internal/zerrors"
-	user "github.com/zitadel/zitadel/pkg/grpc/user/v2beta"
+	"github.com/zitadel/zitadel/pkg/grpc/user/v2"
 )
 
 func (s *Server) GetUserByID(ctx context.Context, req *user.GetUserByIDRequest) (_ *user.GetUserByIDResponse, err error) {
-	ctxData := authz.GetCtxData(ctx)
-	if ctxData.UserID != req.GetUserId() {
-		if err := s.checkPermission(ctx, domain.PermissionUserRead, ctxData.OrgID, req.GetUserId()); err != nil {
-			return nil, err
-		}
-	}
-
-	resp, err := s.query.GetUserByID(ctx, true, req.GetUserId())
+	resp, err := s.query.GetUserByIDWithPermission(ctx, true, req.GetUserId(), s.checkPermission)
 	if err != nil {
 		return nil, err
 	}
@@ -40,11 +33,10 @@ func (s *Server) ListUsers(ctx context.Context, req *user.ListUsersRequest) (*us
 	if err != nil {
 		return nil, err
 	}
-	res, err := s.query.SearchUsers(ctx, queries)
+	res, err := s.query.SearchUsers(ctx, queries, s.checkPermission)
 	if err != nil {
 		return nil, err
 	}
-	res.RemoveNoPermission(ctx, s.checkPermission)
 	return &user.ListUsersResponse{
 		Result:  UsersToPb(res.Users, s.assetAPIPrefix(ctx)),
 		Details: object.ToListDetails(res.SearchResponse),
@@ -61,7 +53,12 @@ func UsersToPb(users []*query.User, assetPrefix string) []*user.User {
 
 func userToPb(userQ *query.User, assetPrefix string) *user.User {
 	return &user.User{
-		UserId:             userQ.ID,
+		UserId: userQ.ID,
+		Details: object.DomainToDetailsPb(&domain.ObjectDetails{
+			Sequence:      userQ.Sequence,
+			EventDate:     userQ.ChangeDate,
+			ResourceOwner: userQ.ResourceOwner,
+		}),
 		State:              userStateToPb(userQ.State),
 		Username:           userQ.Username,
 		LoginNames:         userQ.LoginNames,
@@ -85,6 +82,13 @@ func userTypeToPb(userQ *query.User, assetPrefix string) user.UserType {
 }
 
 func humanToPb(userQ *query.Human, assetPrefix, owner string) *user.HumanUser {
+	var passwordChanged, mfaInitSkipped *timestamppb.Timestamp
+	if !userQ.PasswordChanged.IsZero() {
+		passwordChanged = timestamppb.New(userQ.PasswordChanged)
+	}
+	if !userQ.MFAInitSkipped.IsZero() {
+		mfaInitSkipped = timestamppb.New(userQ.MFAInitSkipped)
+	}
 	return &user.HumanUser{
 		Profile: &user.HumanProfile{
 			GivenName:         userQ.FirstName,
@@ -103,6 +107,9 @@ func humanToPb(userQ *query.Human, assetPrefix, owner string) *user.HumanUser {
 			Phone:      string(userQ.Phone),
 			IsVerified: userQ.IsPhoneVerified,
 		},
+		PasswordChangeRequired: userQ.PasswordChangeRequired,
+		PasswordChanged:        passwordChanged,
+		MfaInitSkipped:         mfaInitSkipped,
 	}
 }
 
@@ -110,7 +117,7 @@ func machineToPb(userQ *query.Machine) *user.MachineUser {
 	return &user.MachineUser{
 		Name:            userQ.Name,
 		Description:     userQ.Description,
-		HasSecret:       userQ.Secret != nil,
+		HasSecret:       userQ.EncodedSecret != "",
 		AccessTokenType: accessTokenTypeToPb(userQ.AccessTokenType),
 	}
 }
@@ -220,7 +227,7 @@ func userQueriesToQuery(queries []*user.SearchQuery, level uint8) (_ []query.Sea
 func userQueryToQuery(query *user.SearchQuery, level uint8) (query.SearchQuery, error) {
 	if level > 20 {
 		// can't go deeper than 20 levels of nesting.
-		return nil, zerrors.ThrowInvalidArgument(nil, "USER-zsQ97", "Errors.User.TooManyNestingLevels")
+		return nil, zerrors.ThrowInvalidArgument(nil, "USER-zsQ97", "Errors.Query.TooManyNestingLevels")
 	}
 	switch q := query.Query.(type) {
 	case *user.SearchQuery_UserNameQuery:
@@ -235,14 +242,16 @@ func userQueryToQuery(query *user.SearchQuery, level uint8) (query.SearchQuery, 
 		return displayNameQueryToQuery(q.DisplayNameQuery)
 	case *user.SearchQuery_EmailQuery:
 		return emailQueryToQuery(q.EmailQuery)
+	case *user.SearchQuery_PhoneQuery:
+		return phoneQueryToQuery(q.PhoneQuery)
 	case *user.SearchQuery_StateQuery:
 		return stateQueryToQuery(q.StateQuery)
 	case *user.SearchQuery_TypeQuery:
 		return typeQueryToQuery(q.TypeQuery)
 	case *user.SearchQuery_LoginNameQuery:
 		return loginNameQueryToQuery(q.LoginNameQuery)
-	case *user.SearchQuery_ResourceOwner:
-		return resourceOwnerQueryToQuery(q.ResourceOwner)
+	case *user.SearchQuery_OrganizationIdQuery:
+		return resourceOwnerQueryToQuery(q.OrganizationIdQuery)
 	case *user.SearchQuery_InUserIdsQuery:
 		return inUserIdsQueryToQuery(q.InUserIdsQuery)
 	case *user.SearchQuery_OrQuery:
@@ -282,6 +291,10 @@ func emailQueryToQuery(q *user.EmailQuery) (query.SearchQuery, error) {
 	return query.NewUserEmailSearchQuery(q.EmailAddress, object.TextMethodToQuery(q.Method))
 }
 
+func phoneQueryToQuery(q *user.PhoneQuery) (query.SearchQuery, error) {
+	return query.NewUserPhoneSearchQuery(q.Number, object.TextMethodToQuery(q.Method))
+}
+
 func stateQueryToQuery(q *user.StateQuery) (query.SearchQuery, error) {
 	return query.NewUserStateSearchQuery(int32(q.State))
 }
@@ -294,8 +307,8 @@ func loginNameQueryToQuery(q *user.LoginNameQuery) (query.SearchQuery, error) {
 	return query.NewUserLoginNameExistsQuery(q.LoginName, object.TextMethodToQuery(q.Method))
 }
 
-func resourceOwnerQueryToQuery(q *user.ResourceOwnerQuery) (query.SearchQuery, error) {
-	return query.NewUserResourceOwnerSearchQuery(q.OrgID, query.TextEquals)
+func resourceOwnerQueryToQuery(q *user.OrganizationIdQuery) (query.SearchQuery, error) {
+	return query.NewUserResourceOwnerSearchQuery(q.OrganizationId, query.TextEquals)
 }
 
 func inUserIdsQueryToQuery(q *user.InUserIDQuery) (query.SearchQuery, error) {

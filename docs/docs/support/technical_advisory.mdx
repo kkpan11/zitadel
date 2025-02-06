@@ -78,8 +78,8 @@ We understand that these advisories may include breaking changes, and we aim to 
     <td>Breaking Behavior Change</td>
     <td>
         When users are redirected to the ZITADEL Login-UI without any organizational context,
-        they're currently presented a login screen, based on the instance settings,
-        e.g. available IDPs and possible login mechanisms. If the user will then register himself,
+        they're currently presented a login screen, based on the default settings,
+        e.g. available IDPs and possible login mechanisms. If the user will then register themselves,
         by the registration form or through an IDP, the user will always be created on the default organization.
         With the introduced change, the settings will no longer be loaded from the instance, but rather the default organization directly.
     </td>
@@ -149,10 +149,82 @@ We understand that these advisories may include breaking changes, and we aim to 
     <td>New flag to prefill projections during setup instead of after start</td>
     <td>Feature description</td>
     <td>
-      new flag `--init-projections` introduced to `zitadel setup` commands (`setup`, `start-from-setup`, `start-from-init`)
+      New flag `--init-projections` introduced to `zitadel setup` commands (`setup`, `start-from-setup`, `start-from-init`)
     </td>
     <td>2.44.0, 2.43.6, 2.42.12</td>
     <td>2024-01-25</td>
+  </tr>
+  <tr>
+    <td>
+      <a href="./advisory/a10009">A-10009</a>
+    </td>
+    <td>Ensure lock distribution for `FOR UPDATE`-statements on Cockroachdb</td>
+    <td>Feature description</td>
+    <td>
+      Fixes rare cases where updating projections was blocked by a `WRITE_TOO_OLD`-error when using cockroachdb.
+    </td>
+    <td>2.53.0</td>
+    <td>2024-05-28</td>
+  </tr>
+  <tr>
+    <td>
+      <a href="./advisory/a10010">A-10010</a>
+    </td>
+    <td>Event type of token added event changed</td>
+    <td>Breaking Behavior Change</td>
+    <td>
+      Version 2.53.0 improves the token issuance. Due to this there are changes to the event types created on token creation.
+    </td>
+    <td>2.53.0</td>
+    <td>2024-05-28</td>
+  </tr>
+  <tr>
+    <td>
+      <a href="./advisory/a10011">A-10011</a>
+    </td>
+    <td>Identity Provider options: allow "auto" only</td>
+    <td>Breaking Behavior Change</td>
+    <td>
+      Version 2.59.0 allows more combinations in the identity provider options. Due to this there might be unexpected behavior changes.
+    </td>
+    <td>2.59.0</td>
+    <td>2024-08-19</td>
+  </tr>
+  <tr>
+    <td>
+      <a href="./advisory/a10012">A-10012</a>
+    </td>
+    <td>Tncreased transaction duration for projections</td>
+    <td>Breaking Behavior Change</td>
+    <td>
+        In version 2.63.0 we've increased the transaction duration for projections to resolve outdated projections or dead-locks.
+    </td>
+    <td>2.63.0</td>
+    <td>2024-09-26</td>
+  </tr>
+  <tr>
+    <td>
+      <a href="./advisory/a10013">A-10013</a>
+    </td>
+    <td>Deprecation of "stable" version</td>
+    <td>Breaking Behavior Change</td>
+    <td>
+      The "stable" version will no longer be published or updated, and the corresponding Docker image tag will not be maintained anymore.
+    </td>
+    <td>-</td>
+    <td>2024-12-09</td>
+  </tr>
+  <tr>
+    <td>
+      <a href="./advisory/a10014">A-10014</a>
+    </td>
+    <td>Correction of project grant owner</td>
+    <td>Breaking Behavior Change</td>
+    <td>
+      Correct project grant owners, ensuring they are correctly associated with the projects organization.
+    </td>
+    <td>-</td>
+    <td>2025-01-10</td>
   </tr>
 </table>
 

@@ -390,10 +390,10 @@ func TestCRDB_Push_Parallel(t *testing.T) {
 				},
 			},
 			res: res{
-				minErrCount: 1,
+				minErrCount: 0,
 				eventsRes: eventsRes{
 					aggIDs:            []string{"204"},
-					pushedEventsCount: 6,
+					pushedEventsCount: 8,
 					aggTypes:          database.TextArray[eventstore.AggregateType]{eventstore.AggregateType(t.Name())},
 				},
 			},
@@ -607,7 +607,7 @@ func TestCRDB_Push_ResourceOwner(t *testing.T) {
 	}
 }
 
-func pushAggregates(pusher eventstore.Pusher, aggregateCommands [][]eventstore.Command) []error {
+func pushAggregates(es *eventstore.Eventstore, aggregateCommands [][]eventstore.Command) []error {
 	wg := sync.WaitGroup{}
 	errs := make([]error, 0)
 	errsMu := sync.Mutex{}
@@ -619,7 +619,7 @@ func pushAggregates(pusher eventstore.Pusher, aggregateCommands [][]eventstore.C
 		go func(events []eventstore.Command) {
 			<-ctx.Done()
 
-			_, err := pusher.Push(context.Background(), events...) //nolint:contextcheck
+			_, err := es.Push(context.Background(), events...) //nolint:contextcheck
 			if err != nil {
 				errsMu.Lock()
 				errs = append(errs, err)

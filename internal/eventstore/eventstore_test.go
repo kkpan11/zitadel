@@ -8,8 +8,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/zitadel/zitadel/internal/api/authz"
 	"github.com/zitadel/zitadel/internal/api/service"
+	"github.com/zitadel/zitadel/internal/database"
 	"github.com/zitadel/zitadel/internal/zerrors"
 )
 
@@ -327,9 +330,15 @@ func Test_eventData(t *testing.T) {
 	}
 }
 
+var _ Pusher = (*testPusher)(nil)
+
+func (repo *testPusher) Client() *database.DB {
+	return nil
+}
+
 type testPusher struct {
 	events []Event
-	err    error
+	errs   []error
 
 	t *testing.T
 }
@@ -338,9 +347,10 @@ func (repo *testPusher) Health(ctx context.Context) error {
 	return nil
 }
 
-func (repo *testPusher) Push(ctx context.Context, commands ...Command) (events []Event, err error) {
-	if repo.err != nil {
-		return nil, repo.err
+func (repo *testPusher) Push(_ context.Context, _ database.ContextQueryExecuter, commands ...Command) (events []Event, err error) {
+	if len(repo.errs) != 0 {
+		err, repo.errs = repo.errs[0], repo.errs[1:]
+		return nil, err
 	}
 
 	if len(repo.events) != len(commands) {
@@ -434,11 +444,16 @@ func (repo *testQuerier) InstanceIDs(ctx context.Context, queryFactory *SearchQu
 	return repo.instances, nil
 }
 
+func (*testQuerier) Client() *database.DB {
+	return nil
+}
+
 func TestEventstore_Push(t *testing.T) {
 	type args struct {
 		events []Command
 	}
 	type fields struct {
+		maxRetries  int
 		pusher      *testPusher
 		eventMapper map[EventType]func(Event) (Event, error)
 	}
@@ -465,6 +480,7 @@ func TestEventstore_Push(t *testing.T) {
 				},
 			},
 			fields: fields{
+				maxRetries: 1,
 				pusher: &testPusher{
 					t: t,
 					events: []Event{
@@ -474,6 +490,52 @@ func TestEventstore_Push(t *testing.T) {
 								Type:          "test.aggregate",
 								ResourceOwner: "caos",
 								InstanceID:    "zitadel",
+								Version:       "v1",
+							},
+							Data:      []byte(nil),
+							User:      "editorUser",
+							EventType: "test.event",
+						},
+					},
+				},
+				eventMapper: map[EventType]func(Event) (Event, error){
+					"test.event": func(e Event) (Event, error) {
+						return &testEvent{
+							BaseEvent: BaseEvent{
+								Agg: &Aggregate{
+									Type: e.Aggregate().Type,
+								},
+							},
+						}, nil
+					},
+				},
+			},
+		},
+		{
+			name: "one aggregate one event, retry disabled",
+			args: args{
+				events: []Command{
+					newTestEvent(
+						"1",
+						"",
+						func() interface{} {
+							return []byte(nil)
+						},
+						false),
+				},
+			},
+			fields: fields{
+				maxRetries: 0,
+				pusher: &testPusher{
+					t: t,
+					events: []Event{
+						&BaseEvent{
+							Agg: &Aggregate{
+								ID:            "1",
+								Type:          "test.aggregate",
+								ResourceOwner: "caos",
+								InstanceID:    "zitadel",
+								Version:       "v1",
 							},
 							Data:      []byte(nil),
 							User:      "editorUser",
@@ -515,6 +577,7 @@ func TestEventstore_Push(t *testing.T) {
 				},
 			},
 			fields: fields{
+				maxRetries: 1,
 				pusher: &testPusher{
 					t: t,
 					events: []Event{
@@ -524,6 +587,7 @@ func TestEventstore_Push(t *testing.T) {
 								Type:          "test.aggregate",
 								ResourceOwner: "caos",
 								InstanceID:    "zitadel",
+								Version:       "v1",
 							},
 							Data:      []byte(nil),
 							User:      "editorUser",
@@ -535,6 +599,7 @@ func TestEventstore_Push(t *testing.T) {
 								Type:          "test.aggregate",
 								ResourceOwner: "caos",
 								InstanceID:    "zitadel",
+								Version:       "v1",
 							},
 							Data:      []byte(nil),
 							User:      "editorUser",
@@ -586,6 +651,7 @@ func TestEventstore_Push(t *testing.T) {
 				},
 			},
 			fields: fields{
+				maxRetries: 1,
 				pusher: &testPusher{
 					t: t,
 					events: combineEventLists(
@@ -596,6 +662,7 @@ func TestEventstore_Push(t *testing.T) {
 									Type:          "test.aggregate",
 									ResourceOwner: "caos",
 									InstanceID:    "zitadel",
+									Version:       "v1",
 								},
 								Data:      []byte(nil),
 								User:      "editorUser",
@@ -607,6 +674,7 @@ func TestEventstore_Push(t *testing.T) {
 									Type:          "test.aggregate",
 									ResourceOwner: "caos",
 									InstanceID:    "zitadel",
+									Version:       "v1",
 								},
 								Data:      []byte(nil),
 								User:      "editorUser",
@@ -620,6 +688,7 @@ func TestEventstore_Push(t *testing.T) {
 									Type:          "test.aggregate",
 									ResourceOwner: "caos",
 									InstanceID:    "zitadel",
+									Version:       "v1",
 								},
 								Data:      []byte(nil),
 								User:      "editorUser",
@@ -658,9 +727,10 @@ func TestEventstore_Push(t *testing.T) {
 				},
 			},
 			fields: fields{
+				maxRetries: 1,
 				pusher: &testPusher{
-					t:   t,
-					err: zerrors.ThrowInternal(nil, "V2-qaa4S", "test err"),
+					t:    t,
+					errs: []error{zerrors.ThrowInternal(nil, "V2-qaa4S", "test err")},
 				},
 			},
 			res: res{
@@ -681,21 +751,182 @@ func TestEventstore_Push(t *testing.T) {
 				},
 			},
 			fields: fields{
+				maxRetries: 1,
 				pusher: &testPusher{
-					t:   t,
-					err: zerrors.ThrowInternal(nil, "V2-qaa4S", "test err"),
+					t:    t,
+					errs: []error{zerrors.ThrowInternal(nil, "V2-qaa4S", "test err")},
 				},
 			},
 			res: res{
 				wantErr: true,
 			},
 		},
+		{
+			name: "retry succeeds",
+			args: args{
+				events: []Command{
+					newTestEvent(
+						"1",
+						"",
+						func() interface{} {
+							return []byte(nil)
+						},
+						false),
+				},
+			},
+			fields: fields{
+				maxRetries: 1,
+				pusher: &testPusher{
+					t: t,
+					events: []Event{
+						&BaseEvent{
+							Agg: &Aggregate{
+								ID:            "1",
+								Type:          "test.aggregate",
+								ResourceOwner: "caos",
+								InstanceID:    "zitadel",
+								Version:       "v1",
+							},
+							Data:      []byte(nil),
+							User:      "editorUser",
+							EventType: "test.event",
+						},
+					},
+					errs: []error{
+						zerrors.ThrowInternal(&pgconn.PgError{
+							ConstraintName: "events2_pkey",
+							Code:           "23505",
+						}, "foo-err", "Errors.Internal"),
+					},
+				},
+				eventMapper: map[EventType]func(Event) (Event, error){
+					"test.event": func(e Event) (Event, error) {
+						return &testEvent{
+							BaseEvent: BaseEvent{
+								Agg: &Aggregate{
+									Type: e.Aggregate().Type,
+								},
+							},
+						}, nil
+					},
+				},
+			},
+		},
+		{
+			name: "retry fails",
+			args: args{
+				events: []Command{
+					newTestEvent(
+						"1",
+						"",
+						func() interface{} {
+							return []byte(nil)
+						},
+						false),
+				},
+			},
+			fields: fields{
+				maxRetries: 1,
+				pusher: &testPusher{
+					t: t,
+					events: []Event{
+						&BaseEvent{
+							Agg: &Aggregate{
+								ID:            "1",
+								Type:          "test.aggregate",
+								ResourceOwner: "caos",
+								InstanceID:    "zitadel",
+								Version:       "v1",
+							},
+							Data:      []byte(nil),
+							User:      "editorUser",
+							EventType: "test.event",
+						},
+					},
+					errs: []error{
+						zerrors.ThrowInternal(&pgconn.PgError{
+							ConstraintName: "events2_pkey",
+							Code:           "23505",
+						}, "foo-err", "Errors.Internal"),
+						zerrors.ThrowInternal(&pgconn.PgError{
+							ConstraintName: "events2_pkey",
+							Code:           "23505",
+						}, "foo-err", "Errors.Internal"),
+					},
+				},
+				eventMapper: map[EventType]func(Event) (Event, error){
+					"test.event": func(e Event) (Event, error) {
+						return &testEvent{
+							BaseEvent: BaseEvent{
+								Agg: &Aggregate{
+									Type: e.Aggregate().Type,
+								},
+							},
+						}, nil
+					},
+				},
+			},
+			res: res{wantErr: true},
+		},
+		{
+			name: "retry disabled",
+			args: args{
+				events: []Command{
+					newTestEvent(
+						"1",
+						"",
+						func() interface{} {
+							return []byte(nil)
+						},
+						false),
+				},
+			},
+			fields: fields{
+				maxRetries: 0,
+				pusher: &testPusher{
+					t: t,
+					events: []Event{
+						&BaseEvent{
+							Agg: &Aggregate{
+								ID:            "1",
+								Type:          "test.aggregate",
+								ResourceOwner: "caos",
+								InstanceID:    "zitadel",
+								Version:       "v1",
+							},
+							Data:      []byte(nil),
+							User:      "editorUser",
+							EventType: "test.event",
+						},
+					},
+					errs: []error{
+						zerrors.ThrowInternal(&pgconn.PgError{
+							ConstraintName: "events2_pkey",
+							Code:           "23505",
+						}, "foo-err", "Errors.Internal"),
+					},
+				},
+				eventMapper: map[EventType]func(Event) (Event, error){
+					"test.event": func(e Event) (Event, error) {
+						return &testEvent{
+							BaseEvent: BaseEvent{
+								Agg: &Aggregate{
+									Type: e.Aggregate().Type,
+								},
+							},
+						}, nil
+					},
+				},
+			},
+			res: res{wantErr: true},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			eventInterceptors = map[EventType]eventTypeInterceptors{}
 			es := &Eventstore{
-				pusher: tt.fields.pusher,
+				maxRetries: tt.fields.maxRetries,
+				pusher:     tt.fields.pusher,
 			}
 			for eventType, mapper := range tt.fields.eventMapper {
 				RegisterFilterEventMapper("test", eventType, mapper)

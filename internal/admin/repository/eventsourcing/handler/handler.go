@@ -18,9 +18,11 @@ type Config struct {
 
 	BulkLimit             uint64
 	FailureCountUntilSkip uint64
-	HandleActiveInstances time.Duration
 	TransactionDuration   time.Duration
 	Handlers              map[string]*ConfigOverwrites
+	ActiveInstancer       interface {
+		ActiveInstances() []string
+	}
 }
 
 type ConfigOverwrites struct {
@@ -34,11 +36,18 @@ func Register(ctx context.Context, config Config, view *view.View, static static
 		return
 	}
 
+	// make sure the slice does not contain old values
+	projections = nil
+
 	projections = append(projections, newStyling(ctx,
 		config.overwrite("Styling"),
 		static,
 		view,
 	))
+}
+
+func Projections() []*handler2.Handler {
+	return projections
 }
 
 func Start(ctx context.Context) {
@@ -47,19 +56,25 @@ func Start(ctx context.Context) {
 	}
 }
 
-func Projections() []*handler2.Handler {
-	return projections
+func ProjectInstance(ctx context.Context) error {
+	for _, projection := range projections {
+		_, err := projection.Trigger(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (config Config) overwrite(viewModel string) handler2.Config {
 	c := handler2.Config{
-		Client:                config.Client,
-		Eventstore:            config.Eventstore,
-		BulkLimit:             uint16(config.BulkLimit),
-		RequeueEvery:          3 * time.Minute,
-		HandleActiveInstances: config.HandleActiveInstances,
-		MaxFailureCount:       uint8(config.FailureCountUntilSkip),
-		TransactionDuration:   config.TransactionDuration,
+		Client:              config.Client,
+		Eventstore:          config.Eventstore,
+		BulkLimit:           uint16(config.BulkLimit),
+		RequeueEvery:        3 * time.Minute,
+		MaxFailureCount:     uint8(config.FailureCountUntilSkip),
+		TransactionDuration: config.TransactionDuration,
+		ActiveInstancer:     config.ActiveInstancer,
 	}
 	overwrite, ok := config.Handlers[viewModel]
 	if !ok {

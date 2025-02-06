@@ -3,19 +3,21 @@ package login
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/gorilla/csrf"
 	"github.com/gorilla/mux"
 
-	"github.com/zitadel/zitadel/feature"
 	"github.com/zitadel/zitadel/internal/api/authz"
 	http_utils "github.com/zitadel/zitadel/internal/api/http"
 	"github.com/zitadel/zitadel/internal/api/http/middleware"
 	_ "github.com/zitadel/zitadel/internal/api/ui/login/statik"
 	auth_repository "github.com/zitadel/zitadel/internal/auth/repository"
 	"github.com/zitadel/zitadel/internal/auth/repository/eventsourcing"
+	"github.com/zitadel/zitadel/internal/cache"
+	"github.com/zitadel/zitadel/internal/cache/connector"
 	"github.com/zitadel/zitadel/internal/command"
 	"github.com/zitadel/zitadel/internal/crypto"
 	"github.com/zitadel/zitadel/internal/domain"
@@ -39,7 +41,7 @@ type Login struct {
 	samlAuthCallbackURL func(context.Context, string) string
 	idpConfigAlg        crypto.EncryptionAlgorithm
 	userCodeAlg         crypto.EncryptionAlgorithm
-	featureCheck        feature.Checker
+	caches              *Caches
 }
 
 type Config struct {
@@ -76,7 +78,7 @@ func CreateLogin(config Config,
 	userCodeAlg crypto.EncryptionAlgorithm,
 	idpConfigAlg crypto.EncryptionAlgorithm,
 	csrfCookieKey []byte,
-	featureCheck feature.Checker,
+	cacheConnectors connector.Connectors,
 ) (*Login, error) {
 	login := &Login{
 		oidcAuthCallbackURL: oidcAuthCallbackURL,
@@ -89,7 +91,6 @@ func CreateLogin(config Config,
 		authRepo:            authRepo,
 		idpConfigAlg:        idpConfigAlg,
 		userCodeAlg:         userCodeAlg,
-		featureCheck:        featureCheck,
 	}
 	csrfInterceptor := createCSRFInterceptor(config.CSRFCookieName, csrfCookieKey, externalSecure, login.csrfErrorHandler())
 	cacheInterceptor := createCacheInterceptor(config.Cache.MaxAge, config.Cache.SharedMaxAge, assetCache)
@@ -98,6 +99,12 @@ func CreateLogin(config Config,
 	login.router = CreateRouter(login, middleware.TelemetryHandler(IgnoreInstanceEndpoints...), oidcInstanceHandler, samlInstanceHandler, csrfInterceptor, cacheInterceptor, security, userAgentCookie, issuerInterceptor, accessHandler)
 	login.renderer = CreateRenderer(HandlerPrefix, staticStorage, config.LanguageCookieName)
 	login.parser = form.NewParser()
+
+	var err error
+	login.caches, err = startCaches(context.Background(), cacheConnectors)
+	if err != nil {
+		return nil, err
+	}
 	return login, nil
 }
 
@@ -133,7 +140,7 @@ func createCSRFInterceptor(cookieName string, csrfCookieKey []byte, externalSecu
 				sameSiteMode = csrf.SameSiteNoneMode
 				// ... and since SameSite none requires the secure flag, we'll set it for TLS and for localhost
 				// (regardless of the TLS / externalSecure settings)
-				secureOnly = externalSecure || instance.RequestedDomain() == "localhost"
+				secureOnly = externalSecure || http_utils.DomainContext(r.Context()).RequestedDomain() == "localhost"
 			}
 			csrf.Protect(csrfCookieKey,
 				csrf.Secure(secureOnly),
@@ -167,7 +174,7 @@ func (l *Login) Handler() http.Handler {
 }
 
 func (l *Login) getClaimedUserIDsOfOrgDomain(ctx context.Context, orgName string) ([]string, error) {
-	orgDomain, err := domain.NewIAMDomainName(orgName, authz.GetInstance(ctx).RequestedDomain())
+	orgDomain, err := domain.NewIAMDomainName(orgName, http_utils.DomainContext(ctx).RequestedDomain())
 	if err != nil {
 		return nil, err
 	}
@@ -175,7 +182,7 @@ func (l *Login) getClaimedUserIDsOfOrgDomain(ctx context.Context, orgName string
 	if err != nil {
 		return nil, err
 	}
-	users, err := l.query.SearchUsers(ctx, &query.UserSearchQueries{Queries: []query.SearchQuery{loginName}})
+	users, err := l.query.SearchUsers(ctx, &query.UserSearchQueries{Queries: []query.SearchQuery{loginName}}, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -203,5 +210,43 @@ func setUserContext(ctx context.Context, userID, resourceOwner string) context.C
 }
 
 func (l *Login) baseURL(ctx context.Context) string {
-	return http_utils.BuildOrigin(authz.GetInstance(ctx).RequestedHost(), l.externalSecure) + HandlerPrefix
+	return http_utils.DomainContext(ctx).Origin() + HandlerPrefix
+}
+
+type Caches struct {
+	idpFormCallbacks cache.Cache[idpFormCallbackIndex, string, *idpFormCallback]
+}
+
+func startCaches(background context.Context, connectors connector.Connectors) (_ *Caches, err error) {
+	caches := new(Caches)
+	caches.idpFormCallbacks, err = connector.StartCache[idpFormCallbackIndex, string, *idpFormCallback](background, []idpFormCallbackIndex{idpFormCallbackIndexRequestID}, cache.PurposeIdPFormCallback, connectors.Config.IdPFormCallbacks, connectors)
+	if err != nil {
+		return nil, err
+	}
+	return caches, nil
+}
+
+type idpFormCallbackIndex int
+
+const (
+	idpFormCallbackIndexUnspecified idpFormCallbackIndex = iota
+	idpFormCallbackIndexRequestID
+)
+
+type idpFormCallback struct {
+	InstanceID string
+	State      string
+	Form       url.Values
+}
+
+// Keys implements cache.Entry
+func (c *idpFormCallback) Keys(i idpFormCallbackIndex) []string {
+	if i == idpFormCallbackIndexRequestID {
+		return []string{idpFormCallbackKey(c.InstanceID, c.State)}
+	}
+	return nil
+}
+
+func idpFormCallbackKey(instanceID, state string) string {
+	return instanceID + "-" + state
 }

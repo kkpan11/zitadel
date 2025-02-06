@@ -19,7 +19,7 @@ type mfaVerifyFormData struct {
 
 func (l *Login) handleMFAVerify(w http.ResponseWriter, r *http.Request) {
 	data := new(mfaVerifyFormData)
-	authReq, err := l.getAuthRequestAndParseData(r, data)
+	authReq, err := l.ensureAuthRequestAndParseData(r, data)
 	if err != nil {
 		l.renderError(w, r, authReq, err)
 		return
@@ -62,12 +62,8 @@ func (l *Login) renderMFAVerify(w http.ResponseWriter, r *http.Request, authReq 
 }
 
 func (l *Login) renderMFAVerifySelected(w http.ResponseWriter, r *http.Request, authReq *domain.AuthRequest, verificationStep *domain.MFAVerificationStep, selectedProvider domain.MFAType, err error) {
-	var errID, errMessage string
-	if err != nil {
-		errID, errMessage = l.getErrorMessage(r, err)
-	}
 	translator := l.getTranslator(r.Context(), authReq)
-	data := l.getUserData(r, authReq, translator, "", "", errID, errMessage)
+	data := l.getUserData(r, authReq, translator, "", "", err)
 	if verificationStep == nil {
 		l.renderError(w, r, authReq, err)
 		return

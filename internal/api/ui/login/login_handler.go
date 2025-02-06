@@ -69,7 +69,7 @@ func (l *Login) handleLoginNameCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if data.Register {
-		if authReq.LoginPolicy != nil && authReq.LoginPolicy.AllowExternalIDP && authReq.AllowedExternalIDPs != nil && len(authReq.AllowedExternalIDPs) > 0 {
+		if authReq != nil && authReq.LoginPolicy != nil && authReq.LoginPolicy.AllowExternalIDP && authReq.AllowedExternalIDPs != nil && len(authReq.AllowedExternalIDPs) > 0 {
 			l.handleRegisterOption(w, r)
 			return
 		}
@@ -91,16 +91,12 @@ func (l *Login) handleLoginNameCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 func (l *Login) renderLogin(w http.ResponseWriter, r *http.Request, authReq *domain.AuthRequest, err error) {
-	var errID, errMessage string
-	if err != nil {
-		errID, errMessage = l.getErrorMessage(r, err)
-	}
-	if singleIDPAllowed(authReq) {
+	if err == nil && singleIDPAllowed(authReq) {
 		l.handleIDP(w, r, authReq, authReq.AllowedExternalIDPs[0].IDPConfigID)
 		return
 	}
 	translator := l.getTranslator(r.Context(), authReq)
-	data := l.getUserData(r, authReq, translator, "Login.Title", "Login.Description", errID, errMessage)
+	data := l.getUserData(r, authReq, translator, "Login.Title", "Login.Description", err)
 	funcs := map[string]interface{}{
 		"hasUsernamePasswordLogin": func() bool {
 			return authReq != nil && authReq.LoginPolicy != nil && authReq.LoginPolicy.AllowUsernamePassword

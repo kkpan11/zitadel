@@ -12,9 +12,10 @@ import (
 	"github.com/zitadel/zitadel/cmd/encryption"
 	"github.com/zitadel/zitadel/cmd/hooks"
 	"github.com/zitadel/zitadel/internal/actions"
-	"github.com/zitadel/zitadel/internal/api/authz"
+	internal_authz "github.com/zitadel/zitadel/internal/api/authz"
 	"github.com/zitadel/zitadel/internal/api/oidc"
 	"github.com/zitadel/zitadel/internal/api/ui/login"
+	"github.com/zitadel/zitadel/internal/cache/connector"
 	"github.com/zitadel/zitadel/internal/command"
 	"github.com/zitadel/zitadel/internal/config/hook"
 	"github.com/zitadel/zitadel/internal/config/systemdefaults"
@@ -28,9 +29,11 @@ import (
 )
 
 type Config struct {
+	ForMirror       bool
 	Database        database.Config
+	Caches          *connector.CachesConfig
 	SystemDefaults  systemdefaults.SystemDefaults
-	InternalAuthZ   authz.Config
+	InternalAuthZ   internal_authz.Config
 	ExternalDomain  string
 	ExternalPort    uint16
 	ExternalSecure  bool
@@ -39,6 +42,7 @@ type Config struct {
 	DefaultInstance command.InstanceSetup
 	Machine         *id.Config
 	Projections     projection.Config
+	Notifications   handlers.WorkerConfig
 	Eventstore      *eventstore.Config
 
 	InitProjections InitProjections
@@ -47,7 +51,7 @@ type Config struct {
 	Login           login.Config
 	WebAuthNName    string
 	Telemetry       *handlers.TelemetryPusherConfig
-	SystemAPIUsers  map[string]*authz.SystemAPIUser
+	SystemAPIUsers  map[string]*internal_authz.SystemAPIUser
 }
 
 type InitProjections struct {
@@ -61,16 +65,19 @@ func MustNewConfig(v *viper.Viper) *Config {
 	config := new(Config)
 	err := v.Unmarshal(config,
 		viper.DecodeHook(mapstructure.ComposeDecodeHookFunc(
+			hooks.SliceTypeStringDecode[*domain.CustomMessageText],
+			hooks.SliceTypeStringDecode[internal_authz.RoleMapping],
+			hooks.MapTypeStringDecode[string, *internal_authz.SystemAPIUser],
+			hooks.MapHTTPHeaderStringDecode,
+			database.DecodeHook,
+			actions.HTTPConfigDecodeHook,
+			hook.EnumHookFunc(internal_authz.MemberTypeString),
 			hook.Base64ToBytesHookFunc(),
 			hook.TagToLanguageHookFunc(),
 			mapstructure.StringToTimeDurationHookFunc(),
 			mapstructure.StringToTimeHookFunc(time.RFC3339),
 			mapstructure.StringToSliceHookFunc(","),
-			database.DecodeHook,
-			hook.EnumHookFunc(domain.FeatureString),
-			hook.EnumHookFunc(authz.MemberTypeString),
-			actions.HTTPConfigDecodeHook,
-			hooks.MapTypeStringDecode[string, *authz.SystemAPIUser],
+			mapstructure.TextUnmarshallerHookFunc(),
 		)),
 	)
 	logging.OnError(err).Fatal("unable to read default config")
@@ -80,29 +87,55 @@ func MustNewConfig(v *viper.Viper) *Config {
 
 	id.Configure(config.Machine)
 
+	// Copy the global role permissions mappings to the instance until we allow instance-level configuration over the API.
+	config.DefaultInstance.RolePermissionMappings = config.InternalAuthZ.RolePermissionMappings
+
 	return config
 }
 
 type Steps struct {
-	s1ProjectionTable               *ProjectionTable
-	s2AssetsTable                   *AssetTable
-	FirstInstance                   *FirstInstance
-	s5LastFailed                    *LastFailed
-	s6OwnerRemoveColumns            *OwnerRemoveColumns
-	s7LogstoreTables                *LogstoreTables
-	s8AuthTokens                    *AuthTokenIndexes
-	CorrectCreationDate             *CorrectCreationDate
-	s12AddOTPColumns                *AddOTPColumns
-	s13FixQuotaProjection           *FixQuotaConstraints
-	s14NewEventsTable               *NewEventsTable
-	s15CurrentStates                *CurrentProjectionState
-	s16UniqueConstraintsLower       *UniqueConstraintToLower
-	s17AddOffsetToUniqueConstraints *AddOffsetToCurrentStates
-	s18AddLowerFieldsToLoginNames   *AddLowerFieldsToLoginNames
-	s19AddCurrentStatesIndex        *AddCurrentSequencesIndex
-	s20AddByUserSessionIndex        *AddByUserIndexToSession
-	s21AddBlockFieldToLimits        *AddBlockFieldToLimits
-	s22ActiveInstancesIndex         *ActiveInstanceEvents
+	s1ProjectionTable                       *ProjectionTable
+	s2AssetsTable                           *AssetTable
+	FirstInstance                           *FirstInstance
+	s5LastFailed                            *LastFailed
+	s6OwnerRemoveColumns                    *OwnerRemoveColumns
+	s7LogstoreTables                        *LogstoreTables
+	s8AuthTokens                            *AuthTokenIndexes
+	CorrectCreationDate                     *CorrectCreationDate
+	s12AddOTPColumns                        *AddOTPColumns
+	s13FixQuotaProjection                   *FixQuotaConstraints
+	s14NewEventsTable                       *NewEventsTable
+	s15CurrentStates                        *CurrentProjectionState
+	s16UniqueConstraintsLower               *UniqueConstraintToLower
+	s17AddOffsetToUniqueConstraints         *AddOffsetToCurrentStates
+	s18AddLowerFieldsToLoginNames           *AddLowerFieldsToLoginNames
+	s19AddCurrentStatesIndex                *AddCurrentSequencesIndex
+	s20AddByUserSessionIndex                *AddByUserIndexToSession
+	s21AddBlockFieldToLimits                *AddBlockFieldToLimits
+	s22ActiveInstancesIndex                 *ActiveInstanceEvents
+	s23CorrectGlobalUniqueConstraints       *CorrectGlobalUniqueConstraints
+	s24AddActorToAuthTokens                 *AddActorToAuthTokens
+	s25User11AddLowerFieldsToVerifiedEmail  *User11AddLowerFieldsToVerifiedEmail
+	s26AuthUsers3                           *AuthUsers3
+	s27IDPTemplate6SAMLNameIDFormat         *IDPTemplate6SAMLNameIDFormat
+	s28AddFieldTable                        *AddFieldTable
+	s29FillFieldsForProjectGrant            *FillFieldsForProjectGrant
+	s30FillFieldsForOrgDomainVerified       *FillFieldsForOrgDomainVerified
+	s31AddAggregateIndexToFields            *AddAggregateIndexToFields
+	s32AddAuthSessionID                     *AddAuthSessionID
+	s33SMSConfigs3TwilioAddVerifyServiceSid *SMSConfigs3TwilioAddVerifyServiceSid
+	s34AddCacheSchema                       *AddCacheSchema
+	s35AddPositionToIndexEsWm               *AddPositionToIndexEsWm
+	s36FillV2Milestones                     *FillV3Milestones
+	s37Apps7OIDConfigsBackChannelLogoutURI  *Apps7OIDConfigsBackChannelLogoutURI
+	s38BackChannelLogoutNotificationStart   *BackChannelLogoutNotificationStart
+	s40InitPushFunc                         *InitPushFunc
+	s42Apps7OIDCConfigsLoginVersion         *Apps7OIDCConfigsLoginVersion
+	s43CreateFieldsDomainIndex              *CreateFieldsDomainIndex
+	s44ReplaceCurrentSequencesIndex         *ReplaceCurrentSequencesIndex
+	s45CorrectProjectOwners                 *CorrectProjectOwners
+	s46InitPermissionFunctions              *InitPermissionFunctions
+	s47FillMembershipFields                 *FillMembershipFields
 }
 
 func MustNewSteps(v *viper.Viper) *Steps {
@@ -127,7 +160,7 @@ func MustNewSteps(v *viper.Viper) *Steps {
 			mapstructure.StringToTimeDurationHookFunc(),
 			mapstructure.StringToTimeHookFunc(time.RFC3339),
 			mapstructure.StringToSliceHookFunc(","),
-			hook.EnumHookFunc(domain.FeatureString),
+			mapstructure.TextUnmarshallerHookFunc(),
 		)),
 	)
 	logging.OnError(err).Fatal("unable to read steps")

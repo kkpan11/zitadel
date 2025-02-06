@@ -4,7 +4,7 @@ sidebar_label: Service description
 custom_edit_url: null
 --- 
 
-Last updated on November 15, 2023
+Last updated on April 5, 2024
 
 This annex of the [Framework Agreement](../terms-of-service) describes the services offered by us.
 
@@ -40,17 +40,40 @@ Operation and direct maintenance of ZITADEL will be done by you.
 
 You can freely choose the infrastructure and location to host ZITADEL.
 
+### Responsibilities
+
+Your obligations while operating and using ZITADEL are detailed in our [terms of service](/docs/legal/terms-of-service#your-obligations) given the provisions in our [acceptable use policy](/docs/legal/policies/acceptable-use-policy).
+When using ZITADEL Cloud, we may processing data on behalf according to the [data processing agreement](/docs/legal/data-processing-agreement).
+
+In a self-hosted setup, you will be responsible for the cost, operations, and availability of your infrastructure.
+For DDoS, bot, and threat detection and protection we rely on external services in ZITADEL Cloud.
+In a self-hosted setup, it is your responsibility to secure the infrastructure to protect confidentiality, integrity, and availability of your data.
+
+ZITADEL Cloud comes with pre-configured SMTP service, SMS service, and a generated domain name.
+The SMTP service and SMS service are limited in use.
+You should configure your own service providers for production use cases.
+In a self-hosted setup, you will be responsible for SMTP / SMS services, domains and certificates.
+
+| Responsibility | ZITADEL Cloud | Self-Hosted |
+| --- | --- | --- |
+| Data / Information | Customer | Customer |
+| User Access | Customer | Customer |
+| SMTP Service | Customer (trial: ZITADEL) | Customer |
+| SMS Service | Customer (trial: ZITADEL) | Customer |
+| Custom Domain / TLS | Customer (trial: ZITADEL) | Customer |
+| DDoS & Bot protection | ZITADEL | Customer |
+| WAF / Threat detection | ZITADEL | Customer |
+| [Backup](#backup) | ZITADEL | Customer |
+| Networking | ZITADEL | Customer |
+| Compute / Scaling | ZITADEL | Customer |
+| Database | ZITADEL | Customer |
+| Application | ZITADEL | ZITADEL |
+
 ## Data location
 
 Data location refers to a region, consisting of one or many countries or territories, where the customer's data is being hosted.
 
 We can not guarantee that during transit the data will only remain within this region. We take measures, as outlined in our [privacy policy](../policies/privacy-policy), to protect your data in transit and in rest.
-
-The following regions will be available when using our cloud service. This list is for informational purposes and will be updated in due course, please refer to our website for all available regions at this time.
-
-- **Global**: All available cloud regions offered by our cloud provider
-- **Switzerland**: Exclusively on Swiss region
-- **GDPR safe countries**: Hosting location is within any of the EU member states and [Adequate Countries](https://ec.europa.eu/info/law/law-topic/data-protection/international-dimension-data-protection/adequacy-decisions_en) as recognized by the European Commission under the GDPR
 
 ## Backup
 

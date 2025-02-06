@@ -5,6 +5,8 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/zitadel/zitadel/internal/command/preparation"
+	"github.com/zitadel/zitadel/internal/crypto"
 	"github.com/zitadel/zitadel/internal/domain"
 	"github.com/zitadel/zitadel/internal/eventstore/v1/models"
 	"github.com/zitadel/zitadel/internal/repository/target"
@@ -16,10 +18,11 @@ type AddTarget struct {
 
 	Name             string
 	TargetType       domain.TargetType
-	URL              string
+	Endpoint         string
 	Timeout          time.Duration
-	Async            bool
 	InterruptOnError bool
+
+	SigningKey string
 }
 
 func (a *AddTarget) IsValid() error {
@@ -29,9 +32,9 @@ func (a *AddTarget) IsValid() error {
 	if a.Timeout == 0 {
 		return zerrors.ThrowInvalidArgument(nil, "COMMAND-39f35d8uri", "Errors.Target.NoTimeout")
 	}
-	_, err := url.Parse(a.URL)
-	if err != nil || a.URL == "" {
-		return zerrors.ThrowInvalidArgument(nil, "COMMAND-1r2k6qo6wg", "Errors.Target.InvalidURL")
+	_, err := url.Parse(a.Endpoint)
+	if err != nil || a.Endpoint == "" {
+		return zerrors.ThrowInvalidArgument(err, "COMMAND-1r2k6qo6wg", "Errors.Target.InvalidURL")
 	}
 
 	return nil
@@ -52,17 +55,27 @@ func (c *Commands) AddTarget(ctx context.Context, add *AddTarget, resourceOwner 
 			return nil, err
 		}
 	}
-
-	wm := NewTargetWriteModel(add.AggregateID, resourceOwner)
+	wm, err := c.getTargetWriteModelByID(ctx, add.AggregateID, resourceOwner)
+	if err != nil {
+		return nil, err
+	}
+	if wm.State.Exists() {
+		return nil, zerrors.ThrowAlreadyExists(nil, "INSTANCE-9axkz0jvzm", "Errors.Target.AlreadyExists")
+	}
+	code, err := c.newSigningKey(ctx, c.eventstore.Filter, c.targetEncryption) //nolint
+	if err != nil {
+		return nil, err
+	}
+	add.SigningKey = code.PlainCode()
 	pushedEvents, err := c.eventstore.Push(ctx, target.NewAddedEvent(
 		ctx,
 		TargetAggregateFromWriteModel(&wm.WriteModel),
 		add.Name,
 		add.TargetType,
-		add.URL,
+		add.Endpoint,
 		add.Timeout,
-		add.Async,
 		add.InterruptOnError,
+		code.Crypted,
 	))
 	if err != nil {
 		return nil, err
@@ -78,10 +91,12 @@ type ChangeTarget struct {
 
 	Name             *string
 	TargetType       *domain.TargetType
-	URL              *string
+	Endpoint         *string
 	Timeout          *time.Duration
-	Async            *bool
 	InterruptOnError *bool
+
+	ExpirationSigningKey bool
+	SigningKey           *string
 }
 
 func (a *ChangeTarget) IsValid() error {
@@ -94,10 +109,10 @@ func (a *ChangeTarget) IsValid() error {
 	if a.Timeout != nil && *a.Timeout == 0 {
 		return zerrors.ThrowInvalidArgument(nil, "COMMAND-08b39vdi57", "Errors.Target.NoTimeout")
 	}
-	if a.URL != nil {
-		_, err := url.Parse(*a.URL)
-		if err != nil || *a.URL == "" {
-			return zerrors.ThrowInvalidArgument(nil, "COMMAND-jsbaera7b6", "Errors.Target.InvalidURL")
+	if a.Endpoint != nil {
+		_, err := url.Parse(*a.Endpoint)
+		if err != nil || *a.Endpoint == "" {
+			return zerrors.ThrowInvalidArgument(err, "COMMAND-jsbaera7b6", "Errors.Target.InvalidURL")
 		}
 	}
 	return nil
@@ -110,7 +125,6 @@ func (c *Commands) ChangeTarget(ctx context.Context, change *ChangeTarget, resou
 	if err := change.IsValid(); err != nil {
 		return nil, err
 	}
-
 	existing, err := c.getTargetWriteModelByID(ctx, change.AggregateID, resourceOwner)
 	if err != nil {
 		return nil, err
@@ -119,15 +133,26 @@ func (c *Commands) ChangeTarget(ctx context.Context, change *ChangeTarget, resou
 		return nil, zerrors.ThrowNotFound(nil, "COMMAND-xj14f2cccn", "Errors.Target.NotFound")
 	}
 
+	var changedSigningKey *crypto.CryptoValue
+	if change.ExpirationSigningKey {
+		code, err := c.newSigningKey(ctx, c.eventstore.Filter, c.targetEncryption) //nolint
+		if err != nil {
+			return nil, err
+		}
+		changedSigningKey = code.Crypted
+		change.SigningKey = &code.Plain
+	}
+
 	changedEvent := existing.NewChangedEvent(
 		ctx,
 		TargetAggregateFromWriteModel(&existing.WriteModel),
 		change.Name,
 		change.TargetType,
-		change.URL,
+		change.Endpoint,
 		change.Timeout,
-		change.Async,
-		change.InterruptOnError)
+		change.InterruptOnError,
+		changedSigningKey,
+	)
 	if changedEvent == nil {
 		return writeModelToObjectDetails(&existing.WriteModel), nil
 	}
@@ -167,6 +192,15 @@ func (c *Commands) DeleteTarget(ctx context.Context, id, resourceOwner string) (
 	return writeModelToObjectDetails(&existing.WriteModel), nil
 }
 
+func (c *Commands) existsTargetsByIDs(ctx context.Context, ids []string, resourceOwner string) bool {
+	wm := NewTargetsExistsWriteModel(ids, resourceOwner)
+	err := c.eventstore.FilterToQueryReducer(ctx, wm)
+	if err != nil {
+		return false
+	}
+	return wm.AllExists()
+}
+
 func (c *Commands) getTargetWriteModelByID(ctx context.Context, id string, resourceOwner string) (*TargetWriteModel, error) {
 	wm := NewTargetWriteModel(id, resourceOwner)
 	err := c.eventstore.FilterToQueryReducer(ctx, wm)
@@ -174,4 +208,8 @@ func (c *Commands) getTargetWriteModelByID(ctx context.Context, id string, resou
 		return nil, err
 	}
 	return wm, nil
+}
+
+func (c *Commands) newSigningKey(ctx context.Context, filter preparation.FilterToQueryReducer, alg crypto.EncryptionAlgorithm) (*EncryptedCode, error) {
+	return c.newEncryptedCodeWithDefault(ctx, filter, domain.SecretGeneratorTypeSigningKey, alg, c.defaultSecretGenerators.SigningKey)
 }

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	_ "embed"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -13,7 +14,6 @@ import (
 
 	"github.com/zitadel/zitadel/internal/api/authz"
 	"github.com/zitadel/zitadel/internal/api/call"
-	"github.com/zitadel/zitadel/internal/crypto"
 	"github.com/zitadel/zitadel/internal/database"
 	"github.com/zitadel/zitadel/internal/domain"
 	"github.com/zitadel/zitadel/internal/query/projection"
@@ -42,17 +42,20 @@ type User struct {
 }
 
 type Human struct {
-	FirstName         string              `json:"first_name,omitempty"`
-	LastName          string              `json:"last_name,omitempty"`
-	NickName          string              `json:"nick_name,omitempty"`
-	DisplayName       string              `json:"display_name,omitempty"`
-	AvatarKey         string              `json:"avatar_key,omitempty"`
-	PreferredLanguage language.Tag        `json:"preferred_language,omitempty"`
-	Gender            domain.Gender       `json:"gender,omitempty"`
-	Email             domain.EmailAddress `json:"email,omitempty"`
-	IsEmailVerified   bool                `json:"is_email_verified,omitempty"`
-	Phone             domain.PhoneNumber  `json:"phone,omitempty"`
-	IsPhoneVerified   bool                `json:"is_phone_verified,omitempty"`
+	FirstName              string              `json:"first_name,omitempty"`
+	LastName               string              `json:"last_name,omitempty"`
+	NickName               string              `json:"nick_name,omitempty"`
+	DisplayName            string              `json:"display_name,omitempty"`
+	AvatarKey              string              `json:"avatar_key,omitempty"`
+	PreferredLanguage      language.Tag        `json:"preferred_language,omitempty"`
+	Gender                 domain.Gender       `json:"gender,omitempty"`
+	Email                  domain.EmailAddress `json:"email,omitempty"`
+	IsEmailVerified        bool                `json:"is_email_verified,omitempty"`
+	Phone                  domain.PhoneNumber  `json:"phone,omitempty"`
+	IsPhoneVerified        bool                `json:"is_phone_verified,omitempty"`
+	PasswordChangeRequired bool                `json:"password_change_required,omitempty"`
+	PasswordChanged        time.Time           `json:"password_changed,omitempty"`
+	MFAInitSkipped         time.Time           `json:"mfa_init_skipped,omitempty"`
 }
 
 type Profile struct {
@@ -93,7 +96,7 @@ type Phone struct {
 type Machine struct {
 	Name            string               `json:"name,omitempty"`
 	Description     string               `json:"description,omitempty"`
-	Secret          *crypto.CryptoValue  `json:"secret,omitempty"`
+	EncodedSecret   string               `json:"encoded_hash,omitempty"`
 	AccessTokenType domain.OIDCTokenType `json:"access_token_type,omitempty"`
 }
 
@@ -122,27 +125,12 @@ type NotifyUser struct {
 	PasswordSet        bool
 }
 
-func (u *Users) RemoveNoPermission(ctx context.Context, permissionCheck domain.PermissionCheck) {
-	removableIndexes := make([]int, 0)
-	for i := range u.Users {
-		ctxData := authz.GetCtxData(ctx)
-		if ctxData.UserID != u.Users[i].ID {
-			if err := permissionCheck(ctx, domain.PermissionUserRead, ctxData.OrgID, u.Users[i].ID); err != nil {
-				removableIndexes = append(removableIndexes, i)
-			}
-		}
-	}
-	removed := 0
-	for _, removeIndex := range removableIndexes {
-		u.Users = removeUser(u.Users, removeIndex-removed)
-		removed++
-	}
-	// reset count as some users could be removed
-	u.SearchResponse.Count = uint64(len(u.Users))
-}
-
-func removeUser(slice []*User, s int) []*User {
-	return append(slice[:s], slice[s+1:]...)
+func usersCheckPermission(ctx context.Context, users *Users, permissionCheck domain.PermissionCheck) {
+	users.Users = slices.DeleteFunc(users.Users,
+		func(user *User) bool {
+			return userCheckPermission(ctx, user.ResourceOwner, user.ID, permissionCheck) != nil
+		},
+	)
 }
 
 type UserSearchQueries struct {
@@ -275,6 +263,19 @@ var (
 		name:  projection.HumanIsPhoneVerifiedCol,
 		table: humanTable,
 	}
+
+	HumanPasswordChangeRequiredCol = Column{
+		name:  projection.HumanPasswordChangeRequired,
+		table: humanTable,
+	}
+	HumanPasswordChangedCol = Column{
+		name:  projection.HumanPasswordChanged,
+		table: humanTable,
+	}
+	HumanMFAInitSkippedCol = Column{
+		name:  projection.HumanMFAInitSkipped,
+		table: humanTable,
+	}
 )
 
 var (
@@ -324,6 +325,10 @@ var (
 		table:          notifyTable,
 		isOrderByLower: true,
 	}
+	NotifyVerifiedEmailLowerCaseCol = Column{
+		name:  projection.NotifyVerifiedEmailLowerCol,
+		table: notifyTable,
+	}
 	NotifyPhoneCol = Column{
 		name:  projection.NotifyLastPhoneCol,
 		table: notifyTable,
@@ -341,7 +346,32 @@ var (
 //go:embed user_by_id.sql
 var userByIDQuery string
 
+func userCheckPermission(ctx context.Context, resourceOwner string, userID string, permissionCheck domain.PermissionCheck) error {
+	ctxData := authz.GetCtxData(ctx)
+	if ctxData.UserID != userID {
+		if err := permissionCheck(ctx, domain.PermissionUserRead, resourceOwner, userID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (q *Queries) GetUserByIDWithPermission(ctx context.Context, shouldTriggerBulk bool, userID string, permissionCheck domain.PermissionCheck) (*User, error) {
+	user, err := q.GetUserByID(ctx, shouldTriggerBulk, userID)
+	if err != nil {
+		return nil, err
+	}
+	if err := userCheckPermission(ctx, user.ResourceOwner, user.ID, permissionCheck); err != nil {
+		return nil, err
+	}
+	return user, nil
+}
+
 func (q *Queries) GetUserByID(ctx context.Context, shouldTriggerBulk bool, userID string) (user *User, err error) {
+	return q.GetUserByIDWithResourceOwner(ctx, shouldTriggerBulk, userID, "")
+}
+
+func (q *Queries) GetUserByIDWithResourceOwner(ctx context.Context, shouldTriggerBulk bool, userID, resourceOwner string) (user *User, err error) {
 	ctx, span := tracing.NewSpan(ctx)
 	defer func() { span.EndWithError(err) }()
 
@@ -356,6 +386,7 @@ func (q *Queries) GetUserByID(ctx context.Context, shouldTriggerBulk bool, userI
 		},
 		userByIDQuery,
 		userID,
+		resourceOwner,
 		authz.GetInstance(ctx).InstanceID(),
 	)
 	return user, err
@@ -583,14 +614,51 @@ func (q *Queries) GetNotifyUser(ctx context.Context, shouldTriggered bool, queri
 	return user, err
 }
 
-func (q *Queries) SearchUsers(ctx context.Context, queries *UserSearchQueries) (users *Users, err error) {
+func (q *Queries) CountUsers(ctx context.Context, queries *UserSearchQueries) (count uint64, err error) {
+	ctx, span := tracing.NewSpan(ctx)
+	defer func() { span.EndWithError(err) }()
+
+	query, scan := prepareCountUsersQuery()
+	eq := sq.Eq{UserInstanceIDCol.identifier(): authz.GetInstance(ctx).InstanceID()}
+	stmt, args, err := queries.toQuery(query).Where(eq).ToSql()
+	if err != nil {
+		return 0, zerrors.ThrowInternal(err, "QUERY-w3Dx", "Errors.Query.SQLStatment")
+	}
+
+	err = q.client.QueryContext(ctx, func(rows *sql.Rows) error {
+		count, err = scan(rows)
+		return err
+	}, stmt, args...)
+	if err != nil {
+		return 0, zerrors.ThrowInternal(err, "QUERY-AG4gs", "Errors.Internal")
+	}
+	return count, err
+}
+
+func (q *Queries) SearchUsers(ctx context.Context, queries *UserSearchQueries, permissionCheck domain.PermissionCheck) (*Users, error) {
+	users, err := q.searchUsers(ctx, queries, permissionCheck != nil && authz.GetFeatures(ctx).PermissionCheckV2)
+	if err != nil {
+		return nil, err
+	}
+	if permissionCheck != nil && !authz.GetFeatures(ctx).PermissionCheckV2 {
+		usersCheckPermission(ctx, users, permissionCheck)
+	}
+	return users, nil
+}
+
+func (q *Queries) searchUsers(ctx context.Context, queries *UserSearchQueries, permissionCheckV2 bool) (users *Users, err error) {
 	ctx, span := tracing.NewSpan(ctx)
 	defer func() { span.EndWithError(err) }()
 
 	query, scan := prepareUsersQuery(ctx, q.client)
-	eq := sq.Eq{UserInstanceIDCol.identifier(): authz.GetInstance(ctx).InstanceID()}
-	stmt, args, err := queries.toQuery(query).Where(eq).
-		ToSql()
+	query = queries.toQuery(query).Where(sq.Eq{
+		UserInstanceIDCol.identifier(): authz.GetInstance(ctx).InstanceID(),
+	})
+	if permissionCheckV2 {
+		query = wherePermittedOrgs(ctx, query, UserResourceOwnerCol.identifier(), domain.PermissionUserRead)
+	}
+
+	stmt, args, err := query.ToSql()
 	if err != nil {
 		return nil, zerrors.ThrowInternal(err, "QUERY-Dgbg2", "Errors.Query.SQLStatment")
 	}
@@ -714,8 +782,8 @@ func NewUserPhoneSearchQuery(value string, comparison TextComparison) (SearchQue
 	return NewTextQuery(HumanPhoneCol, value, comparison)
 }
 
-func NewUserVerifiedEmailSearchQuery(value string, comparison TextComparison) (SearchQuery, error) {
-	return NewTextQuery(NotifyVerifiedEmailCol, value, comparison)
+func NewUserVerifiedEmailSearchQuery(value string) (SearchQuery, error) {
+	return NewTextQuery(NotifyVerifiedEmailLowerCaseCol, strings.ToLower(value), TextEquals)
 }
 
 func NewUserVerifiedPhoneSearchQuery(value string, comparison TextComparison) (SearchQuery, error) {
@@ -812,11 +880,14 @@ func scanUser(row *sql.Row) (*User, error) {
 	isEmailVerified := sql.NullBool{}
 	phone := sql.NullString{}
 	isPhoneVerified := sql.NullBool{}
+	passwordChangeRequired := sql.NullBool{}
+	passwordChanged := sql.NullTime{}
+	mfaInitSkipped := sql.NullTime{}
 
 	machineID := sql.NullString{}
 	name := sql.NullString{}
 	description := sql.NullString{}
-	var secret *crypto.CryptoValue
+	encodedHash := sql.NullString{}
 	accessTokenType := sql.NullInt32{}
 
 	err := row.Scan(
@@ -842,10 +913,13 @@ func scanUser(row *sql.Row) (*User, error) {
 		&isEmailVerified,
 		&phone,
 		&isPhoneVerified,
+		&passwordChangeRequired,
+		&passwordChanged,
+		&mfaInitSkipped,
 		&machineID,
 		&name,
 		&description,
-		&secret,
+		&encodedHash,
 		&accessTokenType,
 		&count,
 	)
@@ -861,23 +935,26 @@ func scanUser(row *sql.Row) (*User, error) {
 
 	if humanID.Valid {
 		u.Human = &Human{
-			FirstName:         firstName.String,
-			LastName:          lastName.String,
-			NickName:          nickName.String,
-			DisplayName:       displayName.String,
-			AvatarKey:         avatarKey.String,
-			PreferredLanguage: language.Make(preferredLanguage.String),
-			Gender:            domain.Gender(gender.Int32),
-			Email:             domain.EmailAddress(email.String),
-			IsEmailVerified:   isEmailVerified.Bool,
-			Phone:             domain.PhoneNumber(phone.String),
-			IsPhoneVerified:   isPhoneVerified.Bool,
+			FirstName:              firstName.String,
+			LastName:               lastName.String,
+			NickName:               nickName.String,
+			DisplayName:            displayName.String,
+			AvatarKey:              avatarKey.String,
+			PreferredLanguage:      language.Make(preferredLanguage.String),
+			Gender:                 domain.Gender(gender.Int32),
+			Email:                  domain.EmailAddress(email.String),
+			IsEmailVerified:        isEmailVerified.Bool,
+			Phone:                  domain.PhoneNumber(phone.String),
+			IsPhoneVerified:        isPhoneVerified.Bool,
+			PasswordChangeRequired: passwordChangeRequired.Bool,
+			PasswordChanged:        passwordChanged.Time,
+			MFAInitSkipped:         mfaInitSkipped.Time,
 		}
 	} else if machineID.Valid {
 		u.Machine = &Machine{
 			Name:            name.String,
 			Description:     description.String,
-			Secret:          secret,
+			EncodedSecret:   encodedHash.String,
 			AccessTokenType: domain.OIDCTokenType(accessTokenType.Int32),
 		}
 	}
@@ -916,6 +993,9 @@ func prepareUserQuery(ctx context.Context, db prepareDatabase) (sq.SelectBuilder
 			HumanIsEmailVerifiedCol.identifier(),
 			HumanPhoneCol.identifier(),
 			HumanIsPhoneVerifiedCol.identifier(),
+			HumanPasswordChangeRequiredCol.identifier(),
+			HumanPasswordChangedCol.identifier(),
+			HumanMFAInitSkippedCol.identifier(),
 			MachineUserIDCol.identifier(),
 			MachineNameCol.identifier(),
 			MachineDescriptionCol.identifier(),
@@ -1233,6 +1313,24 @@ func scanNotifyUser(row *sql.Row) (*NotifyUser, error) {
 	return u, nil
 }
 
+func prepareCountUsersQuery() (sq.SelectBuilder, func(*sql.Rows) (uint64, error)) {
+	return sq.Select(countColumn.identifier()).
+			From(userTable.identifier()).
+			LeftJoin(join(HumanUserIDCol, UserIDCol)).
+			LeftJoin(join(MachineUserIDCol, UserIDCol)).
+			PlaceholderFormat(sq.Dollar),
+		func(rows *sql.Rows) (count uint64, err error) {
+			// the count is implemented as a windowing function,
+			// if it is zero, no row is returned at all.
+			if !rows.Next() {
+				return
+			}
+
+			err = rows.Scan(&count)
+			return
+		}
+}
+
 func prepareUserUniqueQuery(ctx context.Context, db prepareDatabase) (sq.SelectBuilder, func(*sql.Row) (bool, error)) {
 	return sq.Select(
 			UserIDCol.identifier(),
@@ -1302,6 +1400,8 @@ func prepareUsersQuery(ctx context.Context, db prepareDatabase) (sq.SelectBuilde
 			HumanIsEmailVerifiedCol.identifier(),
 			HumanPhoneCol.identifier(),
 			HumanIsPhoneVerifiedCol.identifier(),
+			HumanPasswordChangeRequiredCol.identifier(),
+			HumanPasswordChangedCol.identifier(),
 			MachineUserIDCol.identifier(),
 			MachineNameCol.identifier(),
 			MachineDescriptionCol.identifier(),
@@ -1340,11 +1440,13 @@ func prepareUsersQuery(ctx context.Context, db prepareDatabase) (sq.SelectBuilde
 				isEmailVerified := sql.NullBool{}
 				phone := sql.NullString{}
 				isPhoneVerified := sql.NullBool{}
+				passwordChangeRequired := sql.NullBool{}
+				passwordChanged := sql.NullTime{}
 
 				machineID := sql.NullString{}
 				name := sql.NullString{}
 				description := sql.NullString{}
-				secret := new(crypto.CryptoValue)
+				encodedHash := sql.NullString{}
 				accessTokenType := sql.NullInt32{}
 
 				err := rows.Scan(
@@ -1370,10 +1472,12 @@ func prepareUsersQuery(ctx context.Context, db prepareDatabase) (sq.SelectBuilde
 					&isEmailVerified,
 					&phone,
 					&isPhoneVerified,
+					&passwordChangeRequired,
+					&passwordChanged,
 					&machineID,
 					&name,
 					&description,
-					secret,
+					&encodedHash,
 					&accessTokenType,
 					&count,
 				)
@@ -1388,23 +1492,25 @@ func prepareUsersQuery(ctx context.Context, db prepareDatabase) (sq.SelectBuilde
 
 				if humanID.Valid {
 					u.Human = &Human{
-						FirstName:         firstName.String,
-						LastName:          lastName.String,
-						NickName:          nickName.String,
-						DisplayName:       displayName.String,
-						AvatarKey:         avatarKey.String,
-						PreferredLanguage: language.Make(preferredLanguage.String),
-						Gender:            domain.Gender(gender.Int32),
-						Email:             domain.EmailAddress(email.String),
-						IsEmailVerified:   isEmailVerified.Bool,
-						Phone:             domain.PhoneNumber(phone.String),
-						IsPhoneVerified:   isPhoneVerified.Bool,
+						FirstName:              firstName.String,
+						LastName:               lastName.String,
+						NickName:               nickName.String,
+						DisplayName:            displayName.String,
+						AvatarKey:              avatarKey.String,
+						PreferredLanguage:      language.Make(preferredLanguage.String),
+						Gender:                 domain.Gender(gender.Int32),
+						Email:                  domain.EmailAddress(email.String),
+						IsEmailVerified:        isEmailVerified.Bool,
+						Phone:                  domain.PhoneNumber(phone.String),
+						IsPhoneVerified:        isPhoneVerified.Bool,
+						PasswordChangeRequired: passwordChangeRequired.Bool,
+						PasswordChanged:        passwordChanged.Time,
 					}
 				} else if machineID.Valid {
 					u.Machine = &Machine{
 						Name:            name.String,
 						Description:     description.String,
-						Secret:          secret,
+						EncodedSecret:   encodedHash.String,
 						AccessTokenType: domain.OIDCTokenType(accessTokenType.Int32),
 					}
 				}

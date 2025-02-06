@@ -1,16 +1,21 @@
 package saml
 
 import (
+	"bytes"
 	"context"
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/xml"
+	"io"
 	"net/url"
+	"time"
 
 	"github.com/crewjam/saml"
 	"github.com/crewjam/saml/samlsp"
+	"golang.org/x/text/encoding/ianaindex"
 
+	"github.com/zitadel/zitadel/internal/domain"
 	"github.com/zitadel/zitadel/internal/idp"
 	"github.com/zitadel/zitadel/internal/zerrors"
 )
@@ -26,7 +31,9 @@ type Provider struct {
 
 	spOptions *samlsp.Options
 
-	binding string
+	binding                       string
+	nameIDFormat                  saml.NameIDFormat
+	transientMappingAttributeName string
 
 	isLinkingAllowed  bool
 	isCreationAllowed bool
@@ -77,6 +84,18 @@ func WithBinding(binding string) ProviderOpts {
 	}
 }
 
+func WithNameIDFormat(format domain.SAMLNameIDFormat) ProviderOpts {
+	return func(p *Provider) {
+		p.nameIDFormat = nameIDFormatFromDomain(format)
+	}
+}
+
+func WithTransientMappingAttributeName(attribute string) ProviderOpts {
+	return func(p *Provider) {
+		p.transientMappingAttributeName = attribute
+	}
+}
+
 func WithCustomRequestTracker(tracker samlsp.RequestTracker) ProviderOpts {
 	return func(p *Provider) {
 		p.requestTracker = tracker
@@ -89,6 +108,41 @@ func WithEntityID(entityID string) ProviderOpts {
 	}
 }
 
+// ParseMetadata parses the metadata with the provided XML encoding and returns the EntityDescriptor
+func ParseMetadata(metadata []byte) (*saml.EntityDescriptor, error) {
+	entityDescriptor := new(saml.EntityDescriptor)
+	reader := bytes.NewReader(metadata)
+	decoder := xml.NewDecoder(reader)
+	decoder.CharsetReader = func(charset string, reader io.Reader) (io.Reader, error) {
+		enc, err := ianaindex.IANA.Encoding(charset)
+		if err != nil {
+			return nil, err
+		}
+		return enc.NewDecoder().Reader(reader), nil
+	}
+	if err := decoder.Decode(entityDescriptor); err != nil {
+		if err.Error() == "expected element type <EntityDescriptor> but have <EntitiesDescriptor>" {
+			// reset reader to start of metadata so we can try to parse it as an EntitiesDescriptor
+			if _, err := reader.Seek(0, io.SeekStart); err != nil {
+				return nil, err
+			}
+			entities := &EntitiesDescriptor{}
+			if err := decoder.Decode(entities); err != nil {
+				return nil, err
+			}
+
+			for i, e := range entities.EntityDescriptors {
+				if len(e.IDPSSODescriptors) > 0 {
+					return &entities.EntityDescriptors[i], nil
+				}
+			}
+			return nil, zerrors.ThrowInternal(nil, "SAML-Ejoi3r2", "no entity found with IDPSSODescriptor")
+		}
+		return nil, err
+	}
+	return entityDescriptor, nil
+}
+
 func New(
 	name string,
 	rootURLStr string,
@@ -97,8 +151,8 @@ func New(
 	key []byte,
 	options ...ProviderOpts,
 ) (*Provider, error) {
-	entityDescriptor := new(saml.EntityDescriptor)
-	if err := xml.Unmarshal(metadata, entityDescriptor); err != nil {
+	entityDescriptor, err := ParseMetadata(metadata)
+	if err != nil {
 		return nil, err
 	}
 	keyPair, err := tls.X509KeyPair(certificate, key)
@@ -124,6 +178,8 @@ func New(
 		name:        name,
 		spOptions:   &opts,
 		Certificate: certificate,
+		// the library uses transient as default, which does not make sense for federating accounts
+		nameIDFormat: saml.PersistentNameIDFormat,
 	}
 	for _, option := range options {
 		option(provider)
@@ -156,12 +212,14 @@ func (p *Provider) GetSP() (*samlsp.Middleware, error) {
 	if err != nil {
 		return nil, zerrors.ThrowInternal(err, "SAML-qee09ffuq5", "Errors.Intent.IDPInvalid")
 	}
+	sp.ServiceProvider.AuthnNameIDFormat = p.nameIDFormat
 	if p.requestTracker != nil {
 		sp.RequestTracker = p.requestTracker
 	}
 	if p.binding != "" {
 		sp.Binding = p.binding
 	}
+	sp.ServiceProvider.MetadataValidDuration = time.Until(sp.ServiceProvider.Certificate.NotAfter)
 	return sp, nil
 }
 
@@ -175,4 +233,46 @@ func (p *Provider) BeginAuth(ctx context.Context, state string, _ ...idp.Paramet
 		ServiceProvider: m,
 		state:           state,
 	}, nil
+}
+
+func (p *Provider) TransientMappingAttributeName() string {
+	return p.transientMappingAttributeName
+}
+
+func nameIDFormatFromDomain(format domain.SAMLNameIDFormat) saml.NameIDFormat {
+	switch format {
+	case domain.SAMLNameIDFormatUnspecified:
+		return saml.UnspecifiedNameIDFormat
+	case domain.SAMLNameIDFormatEmailAddress:
+		return saml.EmailAddressNameIDFormat
+	case domain.SAMLNameIDFormatPersistent:
+		return saml.PersistentNameIDFormat
+	case domain.SAMLNameIDFormatTransient:
+		return saml.TransientNameIDFormat
+	default:
+		return saml.UnspecifiedNameIDFormat
+	}
+}
+
+// EntitiesDescriptor is a workaround until we eventually fork the crewjam/saml library, since maintenance on that repo seems to have stopped.
+// This is to be able to handle xsd:duration format using the UnmarshalXML method.
+// crewjam/saml only implements the xsd:dateTime format for EntityDescriptor, but not EntitiesDescriptor.
+type EntitiesDescriptor saml.EntitiesDescriptor
+
+// UnmarshalXML implements xml.Unmarshaler
+func (m *EntitiesDescriptor) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	type Alias EntitiesDescriptor
+	aux := &struct {
+		ValidUntil    *saml.RelaxedTime `xml:"validUntil,attr,omitempty"`
+		CacheDuration *saml.Duration    `xml:"cacheDuration,attr,omitempty"`
+		*Alias
+	}{
+		Alias: (*Alias)(m),
+	}
+	if err := d.DecodeElement(aux, &start); err != nil {
+		return err
+	}
+	m.ValidUntil = (*time.Time)(aux.ValidUntil)
+	m.CacheDuration = (*time.Duration)(aux.CacheDuration)
+	return nil
 }

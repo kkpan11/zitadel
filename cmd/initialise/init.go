@@ -9,7 +9,6 @@ import (
 	"github.com/zitadel/logging"
 
 	"github.com/zitadel/zitadel/internal/database"
-	"github.com/zitadel/zitadel/internal/database/dialect"
 )
 
 var (
@@ -19,6 +18,7 @@ var (
 
 	createUserStmt           string
 	grantStmt                string
+	settingsStmt             string
 	databaseStmt             string
 	createEventstoreStmt     string
 	createProjectionsStmt    string
@@ -39,7 +39,7 @@ func New() *cobra.Command {
 		Long: `Sets up the minimum requirements to start ZITADEL.
 
 Prerequisites:
-- cockroachDB
+- database (PostgreSql or cockroachdb)
 
 The user provided by flags needs privileges to
 - create the database if it does not exist
@@ -53,15 +53,16 @@ The user provided by flags needs privileges to
 		},
 	}
 
-	cmd.AddCommand(newZitadel(), newDatabase(), newUser(), newGrant())
+	cmd.AddCommand(newZitadel(), newDatabase(), newUser(), newGrant(), newSettings())
 	return cmd
 }
 
 func InitAll(ctx context.Context, config *Config) {
-	err := initialise(config.Database,
+	err := initialise(ctx, config.Database,
 		VerifyUser(config.Database.Username(), config.Database.Password()),
 		VerifyDatabase(config.Database.DatabaseName()),
 		VerifyGrant(config.Database.DatabaseName(), config.Database.Username()),
+		VerifySettings(config.Database.DatabaseName(), config.Database.Username()),
 	)
 	logging.OnError(err).Fatal("unable to initialize the database")
 
@@ -69,7 +70,7 @@ func InitAll(ctx context.Context, config *Config) {
 	logging.OnError(err).Fatal("unable to initialize ZITADEL")
 }
 
-func initialise(config database.Config, steps ...func(*database.DB) error) error {
+func initialise(ctx context.Context, config database.Config, steps ...func(context.Context, *database.DB) error) error {
 	logging.Info("initialization started")
 
 	err := ReadStmts(config.Type())
@@ -77,18 +78,18 @@ func initialise(config database.Config, steps ...func(*database.DB) error) error
 		return err
 	}
 
-	db, err := database.Connect(config, true, dialect.DBPurposeQuery)
+	db, err := database.Connect(config, true)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 
-	return Init(db, steps...)
+	return Init(ctx, db, steps...)
 }
 
-func Init(db *database.DB, steps ...func(*database.DB) error) error {
+func Init(ctx context.Context, db *database.DB, steps ...func(context.Context, *database.DB) error) error {
 	for _, step := range steps {
-		if err := step(db); err != nil {
+		if err := step(ctx, db); err != nil {
 			return err
 		}
 	}
@@ -143,6 +144,11 @@ func ReadStmts(typ string) (err error) {
 	}
 
 	createUniqueConstraints, err = readStmt(typ, "10_unique_constraints_table")
+	if err != nil {
+		return err
+	}
+
+	settingsStmt, err = readStmt(typ, "11_settings")
 	if err != nil {
 		return err
 	}

@@ -4,9 +4,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/zitadel/zitadel/internal/telemetry/metrics"
-
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+
+	"github.com/zitadel/zitadel/internal/telemetry/metrics"
 )
 
 func shouldNotIgnore(endpoints ...string) func(r *http.Request) bool {
@@ -30,5 +30,5 @@ func TelemetryHandler(handler http.Handler, ignoredEndpoints ...string) http.Han
 }
 
 func spanNameFormatter(_ string, r *http.Request) string {
-	return r.Host + r.URL.EscapedPath()
+	return strings.Split(r.RequestURI, "?")[0]
 }

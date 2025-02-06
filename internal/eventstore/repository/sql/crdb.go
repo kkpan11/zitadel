@@ -10,15 +10,14 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach-go/v2/crdb"
-	"github.com/jackc/pgconn"
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/zitadel/logging"
 
 	"github.com/zitadel/zitadel/internal/api/authz"
 	"github.com/zitadel/zitadel/internal/database"
-	"github.com/zitadel/zitadel/internal/database/dialect"
 	"github.com/zitadel/zitadel/internal/eventstore"
 	"github.com/zitadel/zitadel/internal/eventstore/repository"
+	"github.com/zitadel/zitadel/internal/telemetry/tracing"
 	"github.com/zitadel/zitadel/internal/zerrors"
 )
 
@@ -125,11 +124,11 @@ type CRDB struct {
 func NewCRDB(client *database.DB) *CRDB {
 	switch client.Type() {
 	case "cockroach":
-		awaitOpenTransactionsV1 = " AND creation_date::TIMESTAMP < (SELECT COALESCE(MIN(start), NOW())::TIMESTAMP FROM crdb_internal.cluster_transactions where application_name = '" + dialect.EventstorePusherAppName + "')"
-		awaitOpenTransactionsV2 = ` AND hlc_to_timestamp("position") < (SELECT COALESCE(MIN(start), NOW())::TIMESTAMP FROM crdb_internal.cluster_transactions where application_name = '` + dialect.EventstorePusherAppName + `')`
+		awaitOpenTransactionsV1 = " AND creation_date::TIMESTAMP < (SELECT COALESCE(MIN(start), NOW())::TIMESTAMP FROM crdb_internal.cluster_transactions where application_name = ANY(?))"
+		awaitOpenTransactionsV2 = ` AND hlc_to_timestamp("position") < (SELECT COALESCE(MIN(start), NOW())::TIMESTAMP FROM crdb_internal.cluster_transactions where application_name = ANY(?))`
 	case "postgres":
-		awaitOpenTransactionsV1 = ` AND EXTRACT(EPOCH FROM created_at) < (SELECT COALESCE(EXTRACT(EPOCH FROM min(xact_start)), EXTRACT(EPOCH FROM now())) FROM pg_stat_activity WHERE datname = current_database() AND application_name = '` + dialect.EventstorePusherAppName + `' AND state <> 'idle')`
-		awaitOpenTransactionsV2 = ` AND "position" < (SELECT COALESCE(EXTRACT(EPOCH FROM min(xact_start)), EXTRACT(EPOCH FROM now())) FROM pg_stat_activity WHERE datname = current_database() AND application_name = '` + dialect.EventstorePusherAppName + `' AND state <> 'idle')`
+		awaitOpenTransactionsV1 = ` AND EXTRACT(EPOCH FROM created_at) < (SELECT COALESCE(EXTRACT(EPOCH FROM min(xact_start)), EXTRACT(EPOCH FROM now())) FROM pg_stat_activity WHERE datname = current_database() AND application_name = ANY(?) AND state <> 'idle')`
+		awaitOpenTransactionsV2 = ` AND "position" < (SELECT COALESCE(EXTRACT(EPOCH FROM min(xact_start)), EXTRACT(EPOCH FROM now())) FROM pg_stat_activity WHERE datname = current_database() AND application_name = ANY(?) AND state <> 'idle')`
 	}
 
 	return &CRDB{client}
@@ -249,8 +248,11 @@ func (db *CRDB) handleUniqueConstraints(ctx context.Context, tx *sql.Tx, uniqueC
 }
 
 // FilterToReducer finds all events matching the given search query and passes them to the reduce function.
-func (crdb *CRDB) FilterToReducer(ctx context.Context, searchQuery *eventstore.SearchQueryBuilder, reduce eventstore.Reducer) error {
-	err := query(ctx, crdb, searchQuery, reduce, false)
+func (crdb *CRDB) FilterToReducer(ctx context.Context, searchQuery *eventstore.SearchQueryBuilder, reduce eventstore.Reducer) (err error) {
+	ctx, span := tracing.NewSpan(ctx)
+	defer func() { span.EndWithError(err) }()
+
+	err = query(ctx, crdb, searchQuery, reduce, false)
 	if err == nil {
 		return nil
 	}
@@ -279,21 +281,27 @@ func (db *CRDB) InstanceIDs(ctx context.Context, searchQuery *eventstore.SearchQ
 	return ids, nil
 }
 
-func (db *CRDB) db() *database.DB {
+func (db *CRDB) Client() *database.DB {
 	return db.DB
 }
 
-func (db *CRDB) orderByEventSequence(desc, useV1 bool) string {
+func (db *CRDB) orderByEventSequence(desc, shouldOrderBySequence, useV1 bool) string {
 	if useV1 {
 		if desc {
 			return ` ORDER BY event_sequence DESC`
 		}
 		return ` ORDER BY event_sequence`
 	}
+	if shouldOrderBySequence {
+		if desc {
+			return ` ORDER BY "sequence" DESC`
+		}
+		return ` ORDER BY "sequence"`
+	}
+
 	if desc {
 		return ` ORDER BY "position" DESC, in_tx_order DESC`
 	}
-
 	return ` ORDER BY "position", in_tx_order`
 }
 
@@ -438,11 +446,6 @@ func (db *CRDB) placeholder(query string) string {
 }
 
 func (db *CRDB) isUniqueViolationError(err error) bool {
-	if pqErr, ok := err.(*pq.Error); ok {
-		if pqErr.Code == "23505" {
-			return true
-		}
-	}
 	if pgxErr, ok := err.(*pgconn.PgError); ok {
 		if pgxErr.Code == "23505" {
 			return true

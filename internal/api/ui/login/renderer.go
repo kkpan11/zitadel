@@ -68,6 +68,7 @@ func CreateRenderer(pathPrefix string, staticStorage static.Storage, cookieName 
 		tmplInitPasswordDone:             "init_password_done.html",
 		tmplInitUser:                     "init_user.html",
 		tmplInitUserDone:                 "init_user_done.html",
+		tmplInviteUser:                   "invite_user.html",
 		tmplPasswordResetDone:            "password_reset_done.html",
 		tmplChangePassword:               "change_password.html",
 		tmplChangePasswordDone:           "change_password_done.html",
@@ -193,6 +194,9 @@ func CreateRenderer(pathPrefix string, staticStorage static.Storage, cookieName 
 		"initUserUrl": func() string {
 			return path.Join(r.pathPrefix, EndpointInitUser)
 		},
+		"inviteUserUrl": func() string {
+			return path.Join(r.pathPrefix, EndpointInviteUser)
+		},
 		"changePasswordUrl": func() string {
 			return path.Join(r.pathPrefix, EndpointChangePassword)
 		},
@@ -234,6 +238,9 @@ func CreateRenderer(pathPrefix string, staticStorage static.Storage, cookieName 
 		},
 		"ldapUrl": func() string {
 			return path.Join(r.pathPrefix, EndpointLDAPCallback)
+		},
+		"linkingUserPromptUrl": func() string {
+			return path.Join(r.pathPrefix, EndpointLinkingUserPrompt)
 		},
 	}
 	var err error
@@ -309,7 +316,7 @@ func (l *Login) chooseNextStep(w http.ResponseWriter, r *http.Request, authReq *
 	case *domain.ChangePasswordStep:
 		l.renderChangePassword(w, r, authReq, err)
 	case *domain.VerifyEMailStep:
-		l.renderMailVerification(w, r, authReq, "", err)
+		l.renderMailVerification(w, r, authReq, authReq.UserID, "", step.InitPassword, err)
 	case *domain.MFAPromptStep:
 		l.renderMFAPrompt(w, r, authReq, step, err)
 	case *domain.InitUserStep:
@@ -326,30 +333,33 @@ func (l *Login) chooseNextStep(w http.ResponseWriter, r *http.Request, authReq *
 		l.renderInternalError(w, r, authReq, zerrors.ThrowPreconditionFailed(nil, "APP-asb43", "Errors.User.GrantRequired"))
 	case *domain.ProjectRequiredStep:
 		l.renderInternalError(w, r, authReq, zerrors.ThrowPreconditionFailed(nil, "APP-m92d", "Errors.User.ProjectRequired"))
+	case *domain.VerifyInviteStep:
+		l.renderInviteUser(w, r, authReq, "", "", "", "", nil)
 	default:
 		l.renderInternalError(w, r, authReq, zerrors.ThrowInternal(nil, "APP-ds3QF", "step no possible"))
 	}
 }
 
 func (l *Login) renderInternalError(w http.ResponseWriter, r *http.Request, authReq *domain.AuthRequest, err error) {
-	var msg string
 	if err != nil {
 		log := logging.WithError(err)
 		if authReq != nil {
 			log = log.WithField("auth_req_id", authReq.ID)
 		}
-		log.Error()
-
-		_, msg = l.getErrorMessage(r, err)
+		if zerrors.IsInternal(err) {
+			log.Error()
+		} else {
+			log.Info()
+		}
 	}
 	translator := l.getTranslator(r.Context(), authReq)
-	data := l.getBaseData(r, authReq, translator, "Errors.Internal", "", "Internal", msg)
+	data := l.getBaseData(r, authReq, translator, "Errors.Internal", "", err)
 	l.renderer.RenderTemplate(w, r, translator, l.renderer.Templates[tmplError], data, nil)
 }
 
-func (l *Login) getUserData(r *http.Request, authReq *domain.AuthRequest, translator *i18n.Translator, titleI18nKey string, descriptionI18nKey string, errType, errMessage string) userData {
+func (l *Login) getUserData(r *http.Request, authReq *domain.AuthRequest, translator *i18n.Translator, titleI18nKey string, descriptionI18nKey string, err error) userData {
 	userData := userData{
-		baseData:    l.getBaseData(r, authReq, translator, titleI18nKey, descriptionI18nKey, errType, errMessage),
+		baseData:    l.getBaseData(r, authReq, translator, titleI18nKey, descriptionI18nKey, err),
 		profileData: l.getProfileData(authReq),
 	}
 	if authReq != nil && authReq.LinkingUsers != nil {
@@ -358,7 +368,7 @@ func (l *Login) getUserData(r *http.Request, authReq *domain.AuthRequest, transl
 	return userData
 }
 
-func (l *Login) getBaseData(r *http.Request, authReq *domain.AuthRequest, translator *i18n.Translator, titleI18nKey string, descriptionI18nKey string, errType, errMessage string) baseData {
+func (l *Login) getBaseData(r *http.Request, authReq *domain.AuthRequest, translator *i18n.Translator, titleI18nKey string, descriptionI18nKey string, err error) baseData {
 	title := ""
 	if titleI18nKey != "" {
 		title = translator.LocalizeWithoutArgs(titleI18nKey)
@@ -370,10 +380,16 @@ func (l *Login) getBaseData(r *http.Request, authReq *domain.AuthRequest, transl
 	}
 
 	lang, _ := l.renderer.ReqLang(translator, r).Base()
+	var errID, errMessage string
+	var errPopup bool
+	if err != nil {
+		errID, errMessage, errPopup = l.getErrorMessage(r, err)
+	}
 	baseData := baseData{
 		errorData: errorData{
-			ErrID:      errType,
+			ErrID:      errID,
 			ErrMessage: errMessage,
+			ErrPopup:   errPopup,
 		},
 		Lang:                   lang.String(),
 		Title:                  title,
@@ -469,14 +485,17 @@ func (l *Login) setLinksOnBaseData(baseData baseData, privacyPolicy *domain.Priv
 	return baseData
 }
 
-func (l *Login) getErrorMessage(r *http.Request, err error) (errID, errMsg string) {
+func (l *Login) getErrorMessage(r *http.Request, err error) (errID, errMsg string, popup bool) {
+	idpErr := new(IdPError)
+	if errors.Is(err, idpErr) {
+		popup = true
+	}
 	caosErr := new(zerrors.ZitadelError)
 	if errors.As(err, &caosErr) {
-		localized := l.renderer.LocalizeFromRequest(l.getTranslator(r.Context(), nil), r, caosErr.Message, nil)
-		return caosErr.ID, localized
-
+		localized := l.renderer.LocalizeFromRequest(l.getTranslator(r.Context(), nil), r, caosErr.Message, map[string]interface{}{"Details": caosErr.Parent})
+		return caosErr.ID, localized, popup
 	}
-	return "", err.Error()
+	return "", err.Error(), popup
 }
 
 func (l *Login) getTheme(r *http.Request) string {
@@ -524,12 +543,12 @@ func (l *Login) getOrgID(r *http.Request, authReq *domain.AuthRequest) string {
 }
 
 func (l *Login) getPrivateLabelingID(r *http.Request, authReq *domain.AuthRequest) string {
-	defaultID := authz.GetInstance(r.Context()).DefaultOrganisationID()
-	f, err := l.featureCheck.CheckInstanceBooleanFeature(r.Context(), domain.FeatureLoginDefaultOrg)
-	logging.OnError(err).Warnf("could not check feature %s", domain.FeatureLoginDefaultOrg)
-	if !f.Boolean {
-		defaultID = authz.GetInstance(r.Context()).InstanceID()
+	instance := authz.GetInstance(r.Context())
+	defaultID := instance.DefaultOrganisationID()
+	if !instance.Features().LoginDefaultOrg {
+		defaultID = instance.InstanceID()
 	}
+
 	if authReq != nil {
 		return authReq.PrivateLabelingOrgID(defaultID)
 	}
@@ -649,6 +668,7 @@ type baseData struct {
 type errorData struct {
 	ErrID      string
 	ErrMessage string
+	ErrPopup   bool
 }
 
 type userData struct {
@@ -675,6 +695,7 @@ type passwordData struct {
 	HasLowercase string
 	HasNumber    string
 	HasSymbol    string
+	Expired      bool
 }
 
 type userSelectionData struct {
@@ -706,5 +727,5 @@ type mfaDoneData struct {
 type totpData struct {
 	Url    string
 	Secret string
-	QrCode string
+	QrCode template.HTML
 }

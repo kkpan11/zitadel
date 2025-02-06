@@ -8,12 +8,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/muhlemmer/gu"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/zitadel/zitadel/internal/actions"
 	"github.com/zitadel/zitadel/internal/api/authz"
+	"github.com/zitadel/zitadel/internal/command"
 	"github.com/zitadel/zitadel/internal/domain"
 )
 
@@ -45,9 +47,9 @@ Log:
 `},
 		want: func(t *testing.T, config *Config) {
 			assert.Equal(t, config.Actions.HTTP.DenyList, []actions.AddressChecker{
-				&actions.DomainChecker{Domain: "localhost"},
-				&actions.IPChecker{IP: net.ParseIP("127.0.0.1")},
-				&actions.DomainChecker{Domain: "foobar"}})
+				&actions.HostChecker{Domain: "localhost"},
+				&actions.HostChecker{IP: net.ParseIP("127.0.0.1")},
+				&actions.HostChecker{Domain: "foobar"}})
 		},
 	}, {
 		name: "actions deny list string ok",
@@ -61,16 +63,19 @@ Log:
 `},
 		want: func(t *testing.T, config *Config) {
 			assert.Equal(t, config.Actions.HTTP.DenyList, []actions.AddressChecker{
-				&actions.DomainChecker{Domain: "localhost"},
-				&actions.IPChecker{IP: net.ParseIP("127.0.0.1")},
-				&actions.DomainChecker{Domain: "foobar"}})
+				&actions.HostChecker{Domain: "localhost"},
+				&actions.HostChecker{IP: net.ParseIP("127.0.0.1")},
+				&actions.HostChecker{Domain: "foobar"}})
 		},
 	}, {
 		name: "features ok",
 		args: args{yaml: `
 DefaultInstance:
   Features:
-  - FeatureLoginDefaultOrg: true
+    LoginDefaultOrg: true
+    LegacyIntrospection: true
+    TriggerIntrospectionProjections: true
+    UserSchema: true
 Log:
   Level: info
 Actions:
@@ -78,25 +83,11 @@ Actions:
     DenyList: []
 `},
 		want: func(t *testing.T, config *Config) {
-			assert.Equal(t, config.DefaultInstance.Features, map[domain.Feature]any{
-				domain.FeatureLoginDefaultOrg: true,
-			})
-		},
-	}, {
-		name: "features string ok",
-		args: args{yaml: `
-DefaultInstance:
-  Features: >
-    [{"featureLoginDefaultOrg": true}]
-Log:
-  Level: info
-Actions:
-  HTTP:
-    DenyList: []
-`},
-		want: func(t *testing.T, config *Config) {
-			assert.Equal(t, config.DefaultInstance.Features, map[domain.Feature]any{
-				domain.FeatureLoginDefaultOrg: true,
+			assert.Equal(t, config.DefaultInstance.Features, &command.InstanceFeatures{
+				LoginDefaultOrg:                 gu.Ptr(true),
+				LegacyIntrospection:             gu.Ptr(true),
+				TriggerIntrospectionProjections: gu.Ptr(true),
+				UserSchema:                      gu.Ptr(true),
 			})
 		},
 	}, {
@@ -231,6 +222,52 @@ Actions:
 				MessageTextType: "PasswordReset",
 				Greeting:        "bar",
 			}})
+		},
+	}, {
+		name: "roles ok",
+		args: args{yaml: `
+InternalAuthZ:
+  RolePermissionMappings:
+  - Role: IAM_OWNER
+    Permissions:
+    - iam.write
+  - Role: ORG_OWNER
+    Permissions:
+    - org.write
+    - org.read
+Log:
+  Level: info
+Actions:
+  HTTP:
+    DenyList: []
+`},
+		want: func(t *testing.T, config *Config) {
+			assert.Equal(t, config.InternalAuthZ, authz.Config{
+				RolePermissionMappings: []authz.RoleMapping{
+					{Role: "IAM_OWNER", Permissions: []string{"iam.write"}},
+					{Role: "ORG_OWNER", Permissions: []string{"org.write", "org.read"}},
+				},
+			})
+		},
+	}, {
+		name: "roles string ok",
+		args: args{yaml: `
+InternalAuthZ:
+  RolePermissionMappings: >
+    [{"role": "IAM_OWNER", "permissions": ["iam.write"]}, {"role": "ORG_OWNER", "permissions": ["org.write", "org.read"]}]
+Log:
+  Level: info
+Actions:
+  HTTP:
+    DenyList: []
+`},
+		want: func(t *testing.T, config *Config) {
+			assert.Equal(t, config.InternalAuthZ, authz.Config{
+				RolePermissionMappings: []authz.RoleMapping{
+					{Role: "IAM_OWNER", Permissions: []string{"iam.write"}},
+					{Role: "ORG_OWNER", Permissions: []string{"org.write", "org.read"}},
+				},
+			})
 		},
 	}}
 	for _, tt := range tests {

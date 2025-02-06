@@ -77,7 +77,7 @@ These events now are being handed down to the storage layer for storage.
 
 ZITADEL handles events in two ways. 
 Events that should be processed in near real time are processed by a in memory pub sub system.
-Some events hand be handled in background processing for which the spooler is responsible.
+Some events can be handled asynchronously using the spooler.
 
 ##### Pub Sub
 
@@ -96,7 +96,7 @@ In case of an error an event can be reapplied in two ways:
 ##### Spooler
 
 The spoolers job is it to keep a query view up-to-date or at least look that it does not have a too big lag behind the Event Store.
-Each query view has its own spooler who is responsible to look for the events who are relevant to generate the query view. It does this by triggering the relevant projection.
+Each query view has its own spooler which is responsible to look for the events who are relevant to generate the query view. It does this by triggering the relevant projection.
 Spoolers are especially necessary where someone can query datasets instead of single ids.
 
 > Each view can have exactly one spooler, but spoolers are dynamically leader elected, so even if a spooler crashes it will be replaced in a short amount of time.
@@ -136,16 +136,12 @@ It is also responsible to execute authorization checks. To check if a request is
 
 ### Storage Layer
 
-As ZITADEL itself is built completely stateless only the storage layer is needed for storing things.
-The storage layer of ZITADEL is responsible for multiple things. For example:
+As ZITADEL itself is built completely stateless only the storage layer is needed to persist states.
+The storage layer of ZITADEL is responsible for multiple tasks. For example:
 
-- Distributing data for high availability over multiple server, data centers or regions
 - Guarantee strong consistency for the command side
 - Guarantee good query performance for the query side
-- Ability to store data in specific data centers or regions for data residency (This is only supported with CockroachDB Cloud or Enterprise)
 - Backup and restore operation for disaster recovery purpose
 
-ZITADEL currently supports CockroachDB as first choice of storage due to its perfect match for ZITADELs needs.
-Alternatively you can run ZITADEL also with Postgres which is [Enterprise Supported](/docs/support/software-release-cycles-support#partially-supported).
-Make sure to read our [Production Guide](/docs/self-hosting/manage/production#prefer-cockroachdb) before you decide to use it.
-
+ZITADEL currently supports PostgreSQL and CockroachDB..
+Make sure to read our [Production Guide](/docs/self-hosting/manage/production#prefer-postgresql) before you decide on using one of them.

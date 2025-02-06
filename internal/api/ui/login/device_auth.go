@@ -14,7 +14,6 @@ import (
 	"github.com/zitadel/zitadel/internal/api/authz"
 	"github.com/zitadel/zitadel/internal/api/http/middleware"
 	"github.com/zitadel/zitadel/internal/domain"
-	"github.com/zitadel/zitadel/internal/zerrors"
 )
 
 const (
@@ -23,13 +22,11 @@ const (
 )
 
 func (l *Login) renderDeviceAuthUserCode(w http.ResponseWriter, r *http.Request, err error) {
-	var errID, errMessage string
 	if err != nil {
 		logging.WithError(err).Error()
-		errID, errMessage = l.getErrorMessage(r, err)
 	}
 	translator := l.getTranslator(r.Context(), nil)
-	data := l.getBaseData(r, nil, translator, "DeviceAuth.Title", "DeviceAuth.UserCode.Description", errID, errMessage)
+	data := l.getBaseData(r, nil, translator, "DeviceAuth.Title", "DeviceAuth.UserCode.Description", err)
 	l.renderer.RenderTemplate(w, r, translator, l.renderer.Templates[tmplDeviceAuthUserCode], data, nil)
 }
 
@@ -42,7 +39,7 @@ func (l *Login) renderDeviceAuthAction(w http.ResponseWriter, r *http.Request, a
 		ClientID      string
 		Scopes        []string
 	}{
-		baseData:      l.getBaseData(r, authReq, translator, "DeviceAuth.Title", "DeviceAuth.Action.Description", "", ""),
+		baseData:      l.getBaseData(r, authReq, translator, "DeviceAuth.Title", "DeviceAuth.Action.Description", nil),
 		AuthRequestID: authReq.ID,
 		Username:      authReq.UserName,
 		ClientID:      authReq.ApplicationID,
@@ -64,7 +61,7 @@ func (l *Login) renderDeviceAuthDone(w http.ResponseWriter, r *http.Request, aut
 		baseData
 		Message string
 	}{
-		baseData: l.getBaseData(r, authReq, translator, "DeviceAuth.Title", "DeviceAuth.Done.Description", "", ""),
+		baseData: l.getBaseData(r, authReq, translator, "DeviceAuth.Title", "DeviceAuth.Done.Description", nil),
 	}
 	switch action {
 	case deviceAuthAllowed:
@@ -76,7 +73,7 @@ func (l *Login) renderDeviceAuthDone(w http.ResponseWriter, r *http.Request, aut
 	}
 }
 
-// handleDeviceUserCode serves the Device Authorization user code submission form.
+// handleDeviceAuthUserCode serves the Device Authorization user code submission form.
 // The "user_code" may be submitted by URL (GET) or form (POST).
 // When a "user_code" is received and found through query,
 // handleDeviceAuthUserCode will create a new AuthRequest in the repository.
@@ -112,6 +109,7 @@ func (l *Login) handleDeviceAuthUserCode(w http.ResponseWriter, r *http.Request)
 	}
 	authRequest, err := l.authRepo.CreateAuthRequest(ctx, &domain.AuthRequest{
 		CreationDate:  time.Now(),
+		BrowserInfo:   domain.BrowserInfoFromRequest(r),
 		AgentID:       userAgentID,
 		ApplicationID: deviceAuthReq.ClientID,
 		InstanceID:    authz.GetInstance(ctx).InstanceID(),
@@ -144,9 +142,8 @@ func (l *Login) redirectDeviceAuthStart(w http.ResponseWriter, r *http.Request, 
 // When the action of "allowed" or "denied", the device authorization is updated accordingly.
 // Else the user is presented with a page where they can choose / submit either action.
 func (l *Login) handleDeviceAuthAction(w http.ResponseWriter, r *http.Request) {
-	authReq, err := l.getAuthRequest(r)
-	if authReq == nil {
-		err = zerrors.ThrowInvalidArgument(err, "LOGIN-OLah8", "invalid or missing auth request")
+	authReq, err := l.ensureAuthRequest(r)
+	if err != nil {
 		l.redirectDeviceAuthStart(w, r, err.Error())
 		return
 	}
@@ -163,7 +160,7 @@ func (l *Login) handleDeviceAuthAction(w http.ResponseWriter, r *http.Request) {
 	action := mux.Vars(r)["action"]
 	switch action {
 	case deviceAuthAllowed:
-		_, err = l.command.ApproveDeviceAuth(r.Context(), authDev.DeviceCode, authReq.UserID, authReq.UserAuthMethodTypes(), authReq.AuthTime)
+		_, err = l.command.ApproveDeviceAuth(r.Context(), authDev.DeviceCode, authReq.UserID, authReq.UserOrgID, authReq.UserAuthMethodTypes(), authReq.AuthTime, authReq.PreferredLanguage, authReq.ToUserAgent(), authReq.SessionID)
 	case deviceAuthDenied:
 		_, err = l.command.CancelDeviceAuth(r.Context(), authDev.DeviceCode, domain.DeviceAuthCanceledDenied)
 	default:

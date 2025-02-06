@@ -1,6 +1,8 @@
 package project
 
 import (
+	"net/url"
+
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	object_grpc "github.com/zitadel/zitadel/internal/api/grpc/object"
@@ -61,7 +63,22 @@ func AppOIDCConfigToPb(app *query.OIDCApp) *app_pb.App_OidcConfig {
 			AdditionalOrigins:        app.AdditionalOrigins,
 			AllowedOrigins:           app.AllowedOrigins,
 			SkipNativeAppSuccessPage: app.SkipNativeAppSuccessPage,
+			BackChannelLogoutUri:     app.BackChannelLogoutURI,
+			LoginVersion:             loginVersionToPb(app.LoginVersion, app.LoginBaseURI),
 		},
+	}
+}
+
+func loginVersionToPb(version domain.LoginVersion, baseURI *string) *app_pb.LoginVersion {
+	switch version {
+	case domain.LoginVersionUnspecified:
+		return nil
+	case domain.LoginVersion1:
+		return &app_pb.LoginVersion{Version: &app_pb.LoginVersion_LoginV1{LoginV1: &app_pb.LoginV1{}}}
+	case domain.LoginVersion2:
+		return &app_pb.LoginVersion{Version: &app_pb.LoginVersion_LoginV2{LoginV2: &app_pb.LoginV2{BaseUri: baseURI}}}
+	default:
+		return nil
 	}
 }
 
@@ -138,6 +155,8 @@ func OIDCGrantTypesFromModel(grantTypes []domain.OIDCGrantType) []app_pb.OIDCGra
 			oidcGrantTypes[i] = app_pb.OIDCGrantType_OIDC_GRANT_TYPE_REFRESH_TOKEN
 		case domain.OIDCGrantTypeDeviceCode:
 			oidcGrantTypes[i] = app_pb.OIDCGrantType_OIDC_GRANT_TYPE_DEVICE_CODE
+		case domain.OIDCGrantTypeTokenExchange:
+			oidcGrantTypes[i] = app_pb.OIDCGrantType_OIDC_GRANT_TYPE_TOKEN_EXCHANGE
 		}
 	}
 	return oidcGrantTypes
@@ -158,6 +177,8 @@ func OIDCGrantTypesToDomain(grantTypes []app_pb.OIDCGrantType) []domain.OIDCGran
 			oidcGrantTypes[i] = domain.OIDCGrantTypeRefreshToken
 		case app_pb.OIDCGrantType_OIDC_GRANT_TYPE_DEVICE_CODE:
 			oidcGrantTypes[i] = domain.OIDCGrantTypeDeviceCode
+		case app_pb.OIDCGrantType_OIDC_GRANT_TYPE_TOKEN_EXCHANGE:
+			oidcGrantTypes[i] = domain.OIDCGrantTypeTokenExchange
 		}
 	}
 	return oidcGrantTypes
@@ -304,5 +325,19 @@ func AppQueryToModel(appQuery *app_pb.AppQuery) (query.SearchQuery, error) {
 		return query.NewAppNameSearchQuery(object_grpc.TextMethodToQuery(q.NameQuery.Method), q.NameQuery.Name)
 	default:
 		return nil, zerrors.ThrowInvalidArgument(nil, "APP-Add46", "List.Query.Invalid")
+	}
+}
+
+func LoginVersionToDomain(version *app_pb.LoginVersion) (domain.LoginVersion, string, error) {
+	switch v := version.GetVersion().(type) {
+	case nil:
+		return domain.LoginVersionUnspecified, "", nil
+	case *app_pb.LoginVersion_LoginV1:
+		return domain.LoginVersion1, "", nil
+	case *app_pb.LoginVersion_LoginV2:
+		_, err := url.Parse(v.LoginV2.GetBaseUri())
+		return domain.LoginVersion2, v.LoginV2.GetBaseUri(), err
+	default:
+		return domain.LoginVersionUnspecified, "", nil
 	}
 }

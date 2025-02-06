@@ -18,8 +18,8 @@ import (
 	"github.com/zitadel/zitadel/internal/query"
 	"github.com/zitadel/zitadel/internal/zerrors"
 	objpb "github.com/zitadel/zitadel/pkg/grpc/object"
-	object "github.com/zitadel/zitadel/pkg/grpc/object/v2beta"
-	session "github.com/zitadel/zitadel/pkg/grpc/session/v2beta"
+	"github.com/zitadel/zitadel/pkg/grpc/object/v2"
+	"github.com/zitadel/zitadel/pkg/grpc/session/v2"
 )
 
 var (
@@ -157,7 +157,6 @@ func Test_sessionsToPb(t *testing.T) {
 					Id:             "345",
 					LoginName:      "donald",
 					DisplayName:    "donald duck",
-					OrganisationId: "org1",
 					OrganizationId: "org1",
 				},
 			},
@@ -174,7 +173,6 @@ func Test_sessionsToPb(t *testing.T) {
 					Id:             "345",
 					LoginName:      "donald",
 					DisplayName:    "donald duck",
-					OrganisationId: "org1",
 					OrganizationId: "org1",
 				},
 				Password: &session.PasswordFactor{
@@ -194,7 +192,6 @@ func Test_sessionsToPb(t *testing.T) {
 					Id:             "345",
 					LoginName:      "donald",
 					DisplayName:    "donald duck",
-					OrganisationId: "org1",
 					OrganizationId: "org1",
 				},
 				WebAuthN: &session.WebAuthNFactor{
@@ -215,7 +212,6 @@ func Test_sessionsToPb(t *testing.T) {
 					Id:             "345",
 					LoginName:      "donald",
 					DisplayName:    "donald duck",
-					OrganisationId: "org1",
 					OrganizationId: "org1",
 				},
 				Totp: &session.TOTPFactor{
@@ -343,9 +339,7 @@ func Test_listSessionsRequestToQuery(t *testing.T) {
 					Limit:  0,
 					Asc:    false,
 				},
-				Queries: []query.SearchQuery{
-					mustNewTextQuery(t, query.SessionColumnCreator, "789", query.TextEquals),
-				},
+				Queries: []query.SearchQuery{},
 			},
 		},
 		{
@@ -363,15 +357,13 @@ func Test_listSessionsRequestToQuery(t *testing.T) {
 					SortingColumn: query.SessionColumnCreationDate,
 					Asc:           false,
 				},
-				Queries: []query.SearchQuery{
-					mustNewTextQuery(t, query.SessionColumnCreator, "789", query.TextEquals),
-				},
+				Queries: []query.SearchQuery{},
 			},
 		},
 		{
 			name: "with list query and sessions",
 			args: args{
-				ctx: authz.NewMockContext("123", "456", "789"),
+				ctx: authz.SetCtxData(context.Background(), authz.CtxData{AgentID: "agent", UserID: "789"}),
 				req: &session.ListSessionsRequest{
 					Query: &object.ListQuery{
 						Offset: 10,
@@ -400,6 +392,12 @@ func Test_listSessionsRequestToQuery(t *testing.T) {
 								Method:       objpb.TimestampQueryMethod_TIMESTAMP_QUERY_METHOD_GREATER,
 							},
 						}},
+						{Query: &session.SearchQuery_CreatorQuery{
+							CreatorQuery: &session.CreatorQuery{},
+						}},
+						{Query: &session.SearchQuery_UserAgentQuery{
+							UserAgentQuery: &session.UserAgentQuery{},
+						}},
 					},
 				},
 			},
@@ -415,6 +413,7 @@ func Test_listSessionsRequestToQuery(t *testing.T) {
 					mustNewTextQuery(t, query.SessionColumnUserID, "10", query.TextEquals),
 					mustNewTimestampQuery(t, query.SessionColumnCreationDate, creationDate, query.TimestampGreater),
 					mustNewTextQuery(t, query.SessionColumnCreator, "789", query.TextEquals),
+					mustNewTextQuery(t, query.SessionColumnUserAgentFingerprintID, "agent", query.TextEquals),
 				},
 			},
 		},
@@ -462,13 +461,11 @@ func Test_sessionQueriesToQuery(t *testing.T) {
 		wantErr error
 	}{
 		{
-			name: "creator only",
+			name: "no queries",
 			args: args{
 				ctx: authz.NewMockContext("123", "456", "789"),
 			},
-			want: []query.SearchQuery{
-				mustNewTextQuery(t, query.SessionColumnCreator, "789", query.TextEquals),
-			},
+			want: []query.SearchQuery{},
 		},
 		{
 			name: "invalid argument",
@@ -495,6 +492,9 @@ func Test_sessionQueriesToQuery(t *testing.T) {
 							Ids: []string{"4", "5", "6"},
 						},
 					}},
+					{Query: &session.SearchQuery_CreatorQuery{
+						CreatorQuery: &session.CreatorQuery{},
+					}},
 				},
 			},
 			want: []query.SearchQuery{
@@ -515,6 +515,7 @@ func Test_sessionQueriesToQuery(t *testing.T) {
 
 func Test_sessionQueryToQuery(t *testing.T) {
 	type args struct {
+		ctx   context.Context
 		query *session.SearchQuery
 	}
 	tests := []struct {
@@ -525,60 +526,158 @@ func Test_sessionQueryToQuery(t *testing.T) {
 	}{
 		{
 			name: "invalid argument",
-			args: args{&session.SearchQuery{
-				Query: nil,
-			}},
+			args: args{
+				context.Background(),
+				&session.SearchQuery{
+					Query: nil,
+				}},
 			wantErr: zerrors.ThrowInvalidArgument(nil, "GRPC-Sfefs", "List.Query.Invalid"),
 		},
 		{
 			name: "ids query",
-			args: args{&session.SearchQuery{
-				Query: &session.SearchQuery_IdsQuery{
-					IdsQuery: &session.IDsQuery{
-						Ids: []string{"1", "2", "3"},
+			args: args{
+				context.Background(),
+				&session.SearchQuery{
+					Query: &session.SearchQuery_IdsQuery{
+						IdsQuery: &session.IDsQuery{
+							Ids: []string{"1", "2", "3"},
+						},
 					},
-				},
-			}},
+				}},
 			want: mustNewListQuery(t, query.SessionColumnID, []interface{}{"1", "2", "3"}, query.ListIn),
 		},
 		{
 			name: "user id query",
-			args: args{&session.SearchQuery{
-				Query: &session.SearchQuery_UserIdQuery{
-					UserIdQuery: &session.UserIDQuery{
-						Id: "10",
+			args: args{
+				context.Background(),
+				&session.SearchQuery{
+					Query: &session.SearchQuery_UserIdQuery{
+						UserIdQuery: &session.UserIDQuery{
+							Id: "10",
+						},
 					},
-				},
-			}},
+				}},
 			want: mustNewTextQuery(t, query.SessionColumnUserID, "10", query.TextEquals),
 		},
 		{
 			name: "creation date query",
-			args: args{&session.SearchQuery{
-				Query: &session.SearchQuery_CreationDateQuery{
-					CreationDateQuery: &session.CreationDateQuery{
-						CreationDate: timestamppb.New(creationDate),
-						Method:       objpb.TimestampQueryMethod_TIMESTAMP_QUERY_METHOD_LESS,
+			args: args{
+				context.Background(),
+				&session.SearchQuery{
+					Query: &session.SearchQuery_CreationDateQuery{
+						CreationDateQuery: &session.CreationDateQuery{
+							CreationDate: timestamppb.New(creationDate),
+							Method:       objpb.TimestampQueryMethod_TIMESTAMP_QUERY_METHOD_LESS,
+						},
 					},
-				},
-			}},
+				}},
 			want: mustNewTimestampQuery(t, query.SessionColumnCreationDate, creationDate, query.TimestampLess),
 		},
 		{
 			name: "creation date query with default method",
-			args: args{&session.SearchQuery{
-				Query: &session.SearchQuery_CreationDateQuery{
-					CreationDateQuery: &session.CreationDateQuery{
-						CreationDate: timestamppb.New(creationDate),
+			args: args{
+				context.Background(),
+				&session.SearchQuery{
+					Query: &session.SearchQuery_CreationDateQuery{
+						CreationDateQuery: &session.CreationDateQuery{
+							CreationDate: timestamppb.New(creationDate),
+						},
 					},
-				},
-			}},
+				}},
 			want: mustNewTimestampQuery(t, query.SessionColumnCreationDate, creationDate, query.TimestampEquals),
+		},
+		{
+			name: "own creator",
+			args: args{
+				authz.SetCtxData(context.Background(), authz.CtxData{UserID: "creator"}),
+				&session.SearchQuery{
+					Query: &session.SearchQuery_CreatorQuery{
+						CreatorQuery: &session.CreatorQuery{},
+					},
+				}},
+			want: mustNewTextQuery(t, query.SessionColumnCreator, "creator", query.TextEquals),
+		},
+		{
+			name: "empty own creator, error",
+			args: args{
+				authz.SetCtxData(context.Background(), authz.CtxData{UserID: ""}),
+				&session.SearchQuery{
+					Query: &session.SearchQuery_CreatorQuery{
+						CreatorQuery: &session.CreatorQuery{},
+					},
+				}},
+			wantErr: zerrors.ThrowInvalidArgument(nil, "GRPC-x8n24uh", "List.Query.Invalid"),
+		},
+		{
+			name: "creator",
+			args: args{
+				authz.SetCtxData(context.Background(), authz.CtxData{UserID: "creator1"}),
+				&session.SearchQuery{
+					Query: &session.SearchQuery_CreatorQuery{
+						CreatorQuery: &session.CreatorQuery{Id: gu.Ptr("creator2")},
+					},
+				}},
+			want: mustNewTextQuery(t, query.SessionColumnCreator, "creator2", query.TextEquals),
+		},
+		{
+			name: "empty creator, error",
+			args: args{
+				authz.SetCtxData(context.Background(), authz.CtxData{UserID: "creator1"}),
+				&session.SearchQuery{
+					Query: &session.SearchQuery_CreatorQuery{
+						CreatorQuery: &session.CreatorQuery{Id: gu.Ptr("")},
+					},
+				}},
+			wantErr: zerrors.ThrowInvalidArgument(nil, "GRPC-x8n24uh", "List.Query.Invalid"),
+		},
+		{
+			name: "empty own useragent, error",
+			args: args{
+				authz.SetCtxData(context.Background(), authz.CtxData{AgentID: ""}),
+				&session.SearchQuery{
+					Query: &session.SearchQuery_UserAgentQuery{
+						UserAgentQuery: &session.UserAgentQuery{},
+					},
+				}},
+			wantErr: zerrors.ThrowInvalidArgument(nil, "GRPC-x8n23uh", "List.Query.Invalid"),
+		},
+		{
+			name: "own useragent",
+			args: args{
+				authz.SetCtxData(context.Background(), authz.CtxData{AgentID: "agent"}),
+				&session.SearchQuery{
+					Query: &session.SearchQuery_UserAgentQuery{
+						UserAgentQuery: &session.UserAgentQuery{},
+					},
+				}},
+			want: mustNewTextQuery(t, query.SessionColumnUserAgentFingerprintID, "agent", query.TextEquals),
+		},
+		{
+			name: "empty useragent, error",
+			args: args{
+				authz.SetCtxData(context.Background(), authz.CtxData{AgentID: "agent"}),
+				&session.SearchQuery{
+					Query: &session.SearchQuery_UserAgentQuery{
+						UserAgentQuery: &session.UserAgentQuery{FingerprintId: gu.Ptr("")},
+					},
+				}},
+			wantErr: zerrors.ThrowInvalidArgument(nil, "GRPC-x8n23uh", "List.Query.Invalid"),
+		},
+		{
+			name: "useragent",
+			args: args{
+				authz.SetCtxData(context.Background(), authz.CtxData{AgentID: "agent1"}),
+				&session.SearchQuery{
+					Query: &session.SearchQuery_UserAgentQuery{
+						UserAgentQuery: &session.UserAgentQuery{FingerprintId: gu.Ptr("agent2")},
+					},
+				}},
+			want: mustNewTextQuery(t, query.SessionColumnUserAgentFingerprintID, "agent2", query.TextEquals),
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := sessionQueryToQuery(tt.args.query)
+			got, err := sessionQueryToQuery(tt.args.ctx, tt.args.query)
 			require.ErrorIs(t, err, tt.wantErr)
 			assert.Equal(t, tt.want, got)
 		})

@@ -34,14 +34,14 @@ type AuthRequest struct {
 	HintUserID   *string
 }
 
-func (a *AuthRequest) checkLoginClient(ctx context.Context) error {
+func (a *AuthRequest) checkLoginClient(ctx context.Context, permissionCheck domain.PermissionCheck) error {
 	if uid := authz.GetCtxData(ctx).UserID; uid != a.LoginClient {
-		return zerrors.ThrowPermissionDenied(nil, "OIDCv2-aL0ag", "Errors.AuthRequest.WrongLoginClient")
+		return permissionCheck(ctx, domain.PermissionSessionRead, authz.GetInstance(ctx).InstanceID(), "")
 	}
 	return nil
 }
 
-//go:embed embed/auth_request_by_id.sql
+//go:embed auth_request_by_id.sql
 var authRequestByIDQuery string
 
 func (q *Queries) authRequestByIDQuery(ctx context.Context) string {
@@ -61,7 +61,7 @@ func (q *Queries) AuthRequestByID(ctx context.Context, shouldTriggerBulk bool, i
 
 	var (
 		scope   database.TextArray[string]
-		prompt  database.Array[domain.Prompt]
+		prompt  database.NumberArray[domain.Prompt]
 		locales database.TextArray[string]
 	)
 
@@ -89,7 +89,7 @@ func (q *Queries) AuthRequestByID(ctx context.Context, shouldTriggerBulk bool, i
 	dst.UiLocales = locales
 
 	if checkLoginClient {
-		if err = dst.checkLoginClient(ctx); err != nil {
+		if err = dst.checkLoginClient(ctx, q.checkPermission); err != nil {
 			return nil, err
 		}
 	}

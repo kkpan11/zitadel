@@ -7,7 +7,6 @@ import (
 	"time"
 
 	sq "github.com/Masterminds/squirrel"
-
 	"github.com/zitadel/logging"
 
 	"github.com/zitadel/zitadel/internal/api/authz"
@@ -142,6 +141,10 @@ func NewUserGrantProjectNameQuery(value string, method TextComparison) (SearchQu
 
 func NewUserGrantRoleQuery(value string) (SearchQuery, error) {
 	return NewTextQuery(UserGrantRoles, value, TextListContains)
+}
+
+func NewUserGrantStateQuery(value domain.UserGrantState) (SearchQuery, error) {
+	return NewNumberQuery(UserGrantState, value, NumberEquals)
 }
 
 func NewUserGrantWithGrantedQuery(owner string) (SearchQuery, error) {

@@ -77,7 +77,7 @@ func (c *Commands) getHumanPasswordlessLogin(ctx context.Context, userID, authRe
 	}, nil
 }
 
-func (c *Commands) HumanAddU2FSetup(ctx context.Context, userID, resourceowner string, isLoginUI bool) (*domain.WebAuthNToken, error) {
+func (c *Commands) HumanAddU2FSetup(ctx context.Context, userID, resourceowner string) (*domain.WebAuthNToken, error) {
 	u2fTokens, err := c.getHumanU2FTokens(ctx, userID, resourceowner)
 	if err != nil {
 		return nil, err
@@ -103,7 +103,7 @@ func (c *Commands) HumanAddU2FSetup(ctx context.Context, userID, resourceowner s
 	return createdWebAuthN, nil
 }
 
-func (c *Commands) HumanAddPasswordlessSetup(ctx context.Context, userID, resourceowner string, isLoginUI bool, authenticatorPlatform domain.AuthenticatorAttachment) (*domain.WebAuthNToken, error) {
+func (c *Commands) HumanAddPasswordlessSetup(ctx context.Context, userID, resourceowner string, authenticatorPlatform domain.AuthenticatorAttachment) (*domain.WebAuthNToken, error) {
 	passwordlessTokens, err := c.getHumanPasswordlessTokens(ctx, userID, resourceowner)
 	if err != nil {
 		return nil, err
@@ -134,7 +134,7 @@ func (c *Commands) HumanAddPasswordlessSetupInitCode(ctx context.Context, userID
 	if err != nil {
 		return nil, err
 	}
-	return c.HumanAddPasswordlessSetup(ctx, userID, resourceowner, true, preferredPlatformType)
+	return c.HumanAddPasswordlessSetup(ctx, userID, resourceowner, preferredPlatformType)
 }
 
 func (c *Commands) addHumanWebAuthN(ctx context.Context, userID, resourceowner, rpID string, tokens []*domain.WebAuthNToken, authenticatorPlatform domain.AuthenticatorAttachment, userVerification domain.UserVerificationRequirement) (*HumanWebAuthNWriteModel, *eventstore.Aggregate, *domain.WebAuthNToken, error) {
@@ -143,6 +143,9 @@ func (c *Commands) addHumanWebAuthN(ctx context.Context, userID, resourceowner, 
 	}
 	user, err := c.getHuman(ctx, userID, resourceowner)
 	if err != nil {
+		return nil, nil, nil, err
+	}
+	if err := c.checkPermissionUpdateUserCredentials(ctx, user.ResourceOwner, userID); err != nil {
 		return nil, nil, nil, err
 	}
 	org, err := c.getOrg(ctx, user.ResourceOwner)
@@ -179,7 +182,7 @@ func (c *Commands) HumanVerifyU2FSetup(ctx context.Context, userID, resourceowne
 	if err != nil {
 		return nil, err
 	}
-	userAgg, webAuthN, verifyWebAuthN, err := c.verifyHumanWebAuthN(ctx, userID, resourceowner, tokenName, userAgentID, credentialData, u2fTokens)
+	userAgg, webAuthN, verifyWebAuthN, err := c.verifyHumanWebAuthN(ctx, userID, resourceowner, tokenName, credentialData, u2fTokens)
 	if err != nil {
 		return nil, err
 	}
@@ -230,7 +233,7 @@ func (c *Commands) humanHumanPasswordlessSetup(ctx context.Context, userID, reso
 	if err != nil {
 		return nil, err
 	}
-	userAgg, webAuthN, verifyWebAuthN, err := c.verifyHumanWebAuthN(ctx, userID, resourceowner, tokenName, userAgentID, credentialData, u2fTokens)
+	userAgg, webAuthN, verifyWebAuthN, err := c.verifyHumanWebAuthN(ctx, userID, resourceowner, tokenName, credentialData, u2fTokens)
 	if err != nil {
 		return nil, err
 	}
@@ -263,7 +266,7 @@ func (c *Commands) humanHumanPasswordlessSetup(ctx context.Context, userID, reso
 	return writeModelToObjectDetails(&verifyWebAuthN.WriteModel), nil
 }
 
-func (c *Commands) verifyHumanWebAuthN(ctx context.Context, userID, resourceowner, tokenName, userAgentID string, credentialData []byte, tokens []*domain.WebAuthNToken) (*eventstore.Aggregate, *domain.WebAuthNToken, *HumanWebAuthNWriteModel, error) {
+func (c *Commands) verifyHumanWebAuthN(ctx context.Context, userID, resourceowner, tokenName string, credentialData []byte, tokens []*domain.WebAuthNToken) (*eventstore.Aggregate, *domain.WebAuthNToken, *HumanWebAuthNWriteModel, error) {
 	if userID == "" {
 		return nil, nil, nil, zerrors.ThrowPreconditionFailed(nil, "COMMAND-3M0od", "Errors.IDMissing")
 	}
@@ -272,7 +275,7 @@ func (c *Commands) verifyHumanWebAuthN(ctx context.Context, userID, resourceowne
 		return nil, nil, nil, err
 	}
 	_, token := domain.GetTokenToVerify(tokens)
-	webAuthN, err := c.webauthnConfig.FinishRegistration(ctx, user, token, tokenName, credentialData, userAgentID != "")
+	webAuthN, err := c.webauthnConfig.FinishRegistration(ctx, user, token, tokenName, credentialData)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -575,7 +578,7 @@ func (c *Commands) humanVerifyPasswordlessInitCode(ctx context.Context, userID, 
 	if err != nil {
 		return err
 	}
-	err = crypto.VerifyCode(initCode.ChangeDate, initCode.Expiration, initCode.CryptoCode, verificationCode, passwordlessCodeGenerator)
+	err = crypto.VerifyCode(initCode.ChangeDate, initCode.Expiration, initCode.CryptoCode, verificationCode, passwordlessCodeGenerator.Alg())
 	if err != nil || initCode.State != domain.PasswordlessInitCodeStateActive {
 		userAgg := UserAggregateFromWriteModel(&initCode.WriteModel)
 		_, err = c.eventstore.Push(ctx, usr_repo.NewHumanPasswordlessInitCodeCheckFailedEvent(ctx, userAgg, codeID))
@@ -596,6 +599,10 @@ func (c *Commands) removeHumanWebAuthN(ctx context.Context, userID, webAuthNID, 
 	}
 	if existingWebAuthN.State == domain.MFAStateUnspecified || existingWebAuthN.State == domain.MFAStateRemoved {
 		return nil, zerrors.ThrowNotFound(nil, "COMMAND-DAfb2", "Errors.User.WebAuthN.NotFound")
+	}
+
+	if err := c.checkPermissionUpdateUser(ctx, existingWebAuthN.ResourceOwner, existingWebAuthN.AggregateID); err != nil {
+		return nil, err
 	}
 
 	userAgg := UserAggregateFromWriteModel(&existingWebAuthN.WriteModel)

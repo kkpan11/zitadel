@@ -9,6 +9,7 @@ import (
 	"golang.org/x/text/language"
 
 	"github.com/zitadel/zitadel/internal/api/authz"
+	"github.com/zitadel/zitadel/internal/cache/connector"
 	"github.com/zitadel/zitadel/internal/command"
 	"github.com/zitadel/zitadel/internal/config/systemdefaults"
 	"github.com/zitadel/zitadel/internal/crypto"
@@ -24,7 +25,9 @@ type FirstInstance struct {
 	Org             command.InstanceOrgSetup
 	MachineKeyPath  string
 	PatPath         string
-	Features        map[domain.Feature]any
+	Features        *command.InstanceFeatures
+
+	Skip bool
 
 	instanceSetup     command.InstanceSetup
 	userEncryptionKey *crypto.KeyConfig
@@ -42,6 +45,9 @@ type FirstInstance struct {
 }
 
 func (mig *FirstInstance) Execute(ctx context.Context, _ eventstore.Event) error {
+	if mig.Skip {
+		return nil
+	}
 	keyStorage, err := mig.verifyEncryptionKeys(ctx)
 	if err != nil {
 		return err
@@ -59,7 +65,9 @@ func (mig *FirstInstance) Execute(ctx context.Context, _ eventstore.Event) error
 		return err
 	}
 
-	cmd, err := command.StartCommands(mig.es,
+	cmd, err := command.StartCommands(ctx,
+		mig.es,
+		connector.Connectors{},
 		mig.defaults,
 		mig.zitadelRoles,
 		nil,
@@ -74,6 +82,7 @@ func (mig *FirstInstance) Execute(ctx context.Context, _ eventstore.Event) error
 		userAlg,
 		nil,
 		oidcEncryption,
+		nil,
 		nil,
 		nil,
 		nil,

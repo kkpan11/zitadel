@@ -1,102 +1,27 @@
 ---
-title: Introduction
+title: Examples and SDKs for ZITADEL
 sidebar_label: Introduction
+sidebar_position: 1
 ---
 
 You can integrate ZITADEL quickly into your application and be up and running within minutes.
 To achieve your goals as fast as possible, we provide you with SDKs, Example Repositories and Guides.
 
-The SDKs and Integration depend on the framework and language you are using.
+The SDKs and integration depend on the framework and language you are using.
 
-import { Tile } from "../../src/components/tile";
+import { Frameworks } from "../../src/components/frameworks";
 
-### Resources
+## Resources
 
-<div className="tile-wrapper">
-<Tile title="Angular"
-    imageSource="/docs/img/tech/angular.svg"
-    link="/docs/sdk-examples/angular"></Tile>
-<Tile title="Flutter"
-    imageSource="/docs/img/tech/flutter.svg"
-    link="/docs/sdk-examples/flutter"></Tile>
+<Frameworks />
 
-<Tile title="Go"
-    imageSource="/docs/img/tech/golang.svg"
-    link="/docs/sdk-examples/go"></Tile>
-<Tile
-    title="Java"
-    imageSource="/docs/img/tech/java.svg"
-    link="/docs/sdk-examples/java"></Tile>
-<Tile
-    title="NestJS"
-    imageSource="/docs/img/tech/nestjs.svg"
-    link="/docs/sdk-examples/nestjs"></Tile>
-<Tile
-    title="Next.js"
-    imageSource="/docs/img/tech/nextjs.svg"
-    imageSourceLight="/docs/img/tech/nextjslight.svg"
-    link="/docs/sdk-examples/nextjs"></Tile>
-<Tile
-    title="Python Django"
-    imageSource="/docs/img/tech/django.png"
-    link="/docs/sdk-examples/python-django"></Tile>
-<Tile
-    title="Python Flask"
-    imageSource="/docs/img/tech/flask.svg"
-    imageSourceLight="/docs/img/tech/flasklight.svg"
-    link="/docs/sdk-examples/python-flask"></Tile>
-<Tile
-    title="React"
-    imageSource="/docs/img/tech/react.png"
-    link="/docs/sdk-examples/react"></Tile>
-<Tile
-    title="Symfony"
-    imageSource="/docs/img/tech/php.svg"
-    link="/docs/sdk-examples/symfony"></Tile>
-<Tile
-    title="Vue.js"
-    imageSource="/docs/img/tech/vue.svg"
-    link="/docs/sdk-examples/vue"></Tile>
-<Tile
-    title="Dart"
-    imageSource="/docs/img/tech/dart.svg"
-    link="https://github.com/smartive/zitadel-dart"
-    external="true"></Tile>
-<Tile
-    title="Elixir"
-    imageSource="/docs/img/tech/elixir.svg"
-    link="https://github.com/maennchen/zitadel_api"
-    external="true"></Tile>
-<Tile
-    title="NextAuth"
-    imageSource="/docs/img/tech/nextjs.svg"
-    imageSourceLight="/docs/img/tech/nextjslight.svg"
-    link="https://next-auth.js.org/providers/zitadel"
-    external="true"></Tile>
-<Tile
-    title="Node.js"
-    imageSource="/docs/img/tech/nodejs.svg"
-    link="https://www.npmjs.com/package/@zitadel/node"
-    external="true"></Tile>
-<Tile
-    title=".Net"
-    imageSource="/docs/img/tech/dotnet.svg"
-    link="https://github.com/smartive/zitadel-net"
-    external="true"></Tile>
-<Tile
-    title="Passport.js"
-    imageSource="/docs/img/tech/passportjs.svg"
-    link="https://github.com/buehler/node-passport-zitadel"
-    external="true"></Tile>
-<Tile
-    title="Rust"
-    imageSourceLight="/docs/img/tech/rust.svg"
-    imageSource="/docs/img/tech/rustlight.svg"
-    link="https://github.com/smartive/zitadel-rust"
-    external="true"></Tile>
-</div>
+To further streamline your setup, simply visit the console in ZITADEL where you can select one of the languages or frameworks. This will allow you to instantly set up the configuration for that specific sample in ZITADEL, ensuring you have everything you need to get started right away.
 
-### OIDC Libraries
+![Console](/img/sdk-examples/console.png)
+
+To begin configuring login for any of these samples, start [here](https://zitadel.com/signin).
+
+## OIDC Libraries
 
 OIDC is a standard for authentication and most languages and frameworks do provide a OIDC library which can be easily integrated to your application.
 If we do not provide an specific example, SDK or guide, we strongly recommend using existing authentication libraries for your
@@ -110,7 +35,7 @@ You might want to check out the following links to find a good library:
 - [OpenID General References](https://openid.net/developers/libraries/)
 - [OpenID certified developer tools](https://openid.net/certified-open-id-developer-tools/)
 
-### Other example applications
+## Other example applications
 
 - [B2B customer portal](https://github.com/zitadel/zitadel-nextjs-b2b): Showcase the use of personal access tokens in a B2B environment. Uses NextJS Framework.
 - [Frontend with backend API](https://github.com/zitadel/example-quote-generator-app): A simple web application using a React front-end and a Python back-end API, both secured using ZITADEL
@@ -119,7 +44,7 @@ You might want to check out the following links to find a good library:
 
 Search for the "example" tag in our repository to [explore all examples](https://github.com/search?q=topic%3Aexamples+org%3Azitadel&type=repositories).
 
-### Missing SDK
+## Missing SDK
 
 Is your language/framework missing? Fear not, you can generate your gRPC API Client with ease.
 
@@ -130,7 +55,7 @@ Is your language/framework missing? Fear not, you can generate your gRPC API Cli
 Let us make an example with Ruby. Any other supported language by buf will work as well. Consult
 the [buf plugin registry](https://buf.build/plugins) for more ideas.
 
-#### Example with Ruby
+### Example with Ruby
 
 With gRPC we usually need to generate the client stub and the messages/types. This is why we need two plugins.
 The plugin `grpc/ruby` generates the client stub and the plugin `protocolbuffers/ruby` takes care of the messages/types.

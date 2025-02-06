@@ -2,7 +2,6 @@ package projection
 
 import (
 	"context"
-	"time"
 
 	"github.com/zitadel/zitadel/internal/eventstore"
 	"github.com/zitadel/zitadel/internal/eventstore/handler/v2"
@@ -28,7 +27,7 @@ func (m *mockEventStore) appendFilterResponse(events []eventstore.Event) *mockEv
 	return m
 }
 
-func (m *mockEventStore) InstanceIDs(ctx context.Context, _ time.Duration, _ bool, query *eventstore.SearchQueryBuilder) ([]string, error) {
+func (m *mockEventStore) InstanceIDs(ctx context.Context, query *eventstore.SearchQueryBuilder) ([]string, error) {
 	m.instanceIDCounter++
 	return m.instanceIDsResponse[m.instanceIDCounter-1], nil
 }
@@ -48,4 +47,8 @@ func (m *mockEventStore) FilterToQueryReducer(ctx context.Context, reducer event
 func (m *mockEventStore) Push(ctx context.Context, cmds ...eventstore.Command) ([]eventstore.Event, error) {
 	m.pushCounter++
 	return m.pushResponse[m.pushCounter-1], nil
+}
+
+func (m *mockEventStore) FillFields(ctx context.Context, events ...eventstore.FillFieldsEvent) error {
+	return nil
 }

@@ -2,10 +2,11 @@ package command
 
 import (
 	"context"
-	"reflect"
+	"slices"
 
 	"github.com/zitadel/zitadel/internal/domain"
 	"github.com/zitadel/zitadel/internal/repository/org"
+	"github.com/zitadel/zitadel/internal/telemetry/tracing"
 	"github.com/zitadel/zitadel/internal/zerrors"
 )
 
@@ -32,7 +33,10 @@ func (c *Commands) ClearFlow(ctx context.Context, flowType domain.FlowType, reso
 	return writeModelToObjectDetails(&existingFlow.WriteModel), nil
 }
 
-func (c *Commands) SetTriggerActions(ctx context.Context, flowType domain.FlowType, triggerType domain.TriggerType, actionIDs []string, resourceOwner string) (*domain.ObjectDetails, error) {
+func (c *Commands) SetTriggerActions(ctx context.Context, flowType domain.FlowType, triggerType domain.TriggerType, actionIDs []string, resourceOwner string) (_ *domain.ObjectDetails, err error) {
+	ctx, span := tracing.NewSpan(ctx)
+	defer func() { span.EndWithError(err) }()
+
 	if !flowType.Valid() || !triggerType.Valid() || resourceOwner == "" {
 		return nil, zerrors.ThrowInvalidArgument(nil, "COMMAND-Dfhj5", "Errors.Flow.FlowTypeMissing")
 	}
@@ -43,7 +47,7 @@ func (c *Commands) SetTriggerActions(ctx context.Context, flowType domain.FlowTy
 	if err != nil {
 		return nil, err
 	}
-	if reflect.DeepEqual(existingFlow.Triggers[triggerType], actionIDs) {
+	if slices.Equal(existingFlow.Triggers[triggerType], actionIDs) {
 		return nil, zerrors.ThrowPreconditionFailed(nil, "COMMAND-Nfh52", "Errors.Flow.NoChanges")
 	}
 	if len(actionIDs) > 0 {
@@ -67,9 +71,12 @@ func (c *Commands) SetTriggerActions(ctx context.Context, flowType domain.FlowTy
 	return writeModelToObjectDetails(&existingFlow.WriteModel), nil
 }
 
-func (c *Commands) getOrgFlowWriteModelByType(ctx context.Context, flowType domain.FlowType, resourceOwner string) (*OrgFlowWriteModel, error) {
+func (c *Commands) getOrgFlowWriteModelByType(ctx context.Context, flowType domain.FlowType, resourceOwner string) (_ *OrgFlowWriteModel, err error) {
+	ctx, span := tracing.NewSpan(ctx)
+	defer func() { span.EndWithError(err) }()
+
 	flowWriteModel := NewOrgFlowWriteModel(flowType, resourceOwner)
-	err := c.eventstore.FilterToQueryReducer(ctx, flowWriteModel)
+	err = c.eventstore.FilterToQueryReducer(ctx, flowWriteModel)
 	if err != nil {
 		return nil, err
 	}
